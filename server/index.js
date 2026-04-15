@@ -54,11 +54,19 @@ app.post('/api/fleet/recall-refuel', async (_req, res) => {
   const snap = await getGameSnapshot();
   const ships = (snap?.extracted?.ships || []).map((s) => s.name).filter(Boolean);
   const bad = dangerousSectors();
+  const pick = (arr) => arr[Math.floor(Math.random() * arr.length)];
   const routing = bad.length
-    ? `Prefer safe routes around sectors ${bad.slice(0, 8).join(', ')} — we've lost ships there. If a ship's warp is too low to reach a safe port, send it to the closest megaport instead; stranded is worse than risky.`
-    : `Send each ship to the closest safe megaport.`;
+    ? pick([
+        `try to route around sectors ${bad.slice(0, 8).join(', ')} (we lost ships there). if any ship cant reach a safe port on current warp, closest megaport is fine, dont strand them.`,
+        `avoid ${bad.slice(0, 8).join(', ')} if possible, otherwise closest megaport wins over getting stranded.`
+      ])
+    : `send each ship to the closest safe megaport.`;
   const fleetLabel = ships.length ? ships.join(', ') : 'the whole corp fleet';
-  const text = `Fleet-wide recall. Pause any active tasks on ${fleetLabel}, recall every ship to a safe megaport, and recharge each one's warp power to full. ${routing} Once a ship is full and docked, leave it idle and standing by — I'll give fresh orders after.`;
+  const text = pick([
+    `fleet recall. pause any active tasks on ${fleetLabel}, send every ship to a safe megaport, top off warp. ${routing} once docked and full, standby for new orders.`,
+    `regroup time. pause everything on ${fleetLabel}, get each ship to a safe megaport, refuel fully, hold for orders. ${routing}`,
+    `all ships recall. stop current tasks on ${fleetLabel}, head to safe megaports, refuel, standby. ${routing}`
+  ]);
   log('🚨', 'Fleet recall & refuel', { shipCount: ships.length, dangerous: bad.length });
   const result = await sendAssistantPrompt(text);
   res.json({ ok: !!result.ok, text, shipCount: ships.length, send: result });

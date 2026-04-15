@@ -19,37 +19,50 @@ const evaluateCondition = (cond, snapshot) => {
   }
 };
 
+const pick = (arr) => arr[Math.floor(Math.random() * arr.length)];
+
 const shipPhrase = (spec) =>
   spec.targetShip ? `the ${spec.targetShip}` : 'the fleet';
 
-// Routing guidance for a recall-to-megaport command. Priority is:
-// (1) don't get stranded, (2) prefer safe route, (3) accept closest if safe
-// isn't reachable on current warp.
 const safeRoutingClause = () => {
   const bad = dangerousSectors();
-  if (!bad.length) return 'Prefer a safe megaport; if warp is too low to reach one safely, just go to the closest megaport — do not risk getting stranded.';
+  if (!bad.length) return pick([
+    'pick a safe megaport. if warp is too low to reach one, just go to the closest, dont risk stranding.',
+    'head for a safe megaport. if warp is tight, closest wins over getting stranded.',
+    'safe megaport preferred, but closest if warp is too low.'
+  ]);
   const list = bad.slice(0, 8).join(', ');
-  return `Prefer a safe megaport and plot around sectors ${list} (we've had ships destroyed there). But getting stranded is worse than running a risky sector, so if warp is too low to reach a safe port, head to the closest megaport — any megaport beats being stuck in empty space.`;
+  return pick([
+    `try to route around ${list} (we lost ships there), but if warp is too low to reach a safe port just go to the closest megaport, stranding is worse.`,
+    `avoid sectors ${list} if you can (bad history), otherwise closest megaport is fine.`,
+    `prefer a safe port and steer clear of ${list}, but dont get stranded, any megaport beats empty space.`
+  ]);
 };
 
 const buildKickoffPrompt = (spec) => {
-  const lines = [];
+  const who = shipPhrase(spec);
+  const rules = spec.guardrails?.length ? ` rules: ${spec.guardrails.join('; ')}.` : '';
   if (spec.targetShip) {
-    lines.push(`Put ${shipPhrase(spec)} on this: ${spec.goal}`);
-  } else {
-    lines.push(spec.goal);
+    return pick([
+      `put ${who} on this. ${spec.goal}${rules}`,
+      `new task for ${who}. ${spec.goal}${rules}`,
+      `${who} assignment. ${spec.goal}${rules}`
+    ]);
   }
-  if (spec.guardrails?.length) {
-    lines.push('A few ground rules: ' + spec.guardrails.join('; ') + '.');
-  }
-  return lines.join(' ');
+  return pick([
+    `${spec.goal}${rules}`,
+    `fleet task. ${spec.goal}${rules}`,
+    `heres the plan. ${spec.goal}${rules}`
+  ]);
 };
 
 const buildNudgePrompt = (spec) => {
   const who = shipPhrase(spec);
-  // We only send this when DOM tells us the task died (engine idle + no stat deltas).
-  // So don't ask for status — just re-kick.
-  return `Looks like ${who}'s task dropped out. Pick it back up — ${spec.goal}`;
+  return pick([
+    `looks like ${who}'s task stopped. pick it back up: ${spec.goal}`,
+    `${who}'s task seems to have dropped. resume it: ${spec.goal}`,
+    `${who} is idle again, back to it: ${spec.goal}`
+  ]);
 };
 
 const reasonPhrase = (reason, snapshot) => {
@@ -76,17 +89,29 @@ const buildAbortPrompt = (spec, reason, snapshot) => {
   const who = shipPhrase(spec);
   const routing = safeRoutingClause();
   if (reason === 'user-abort' || reason === 'user') {
-    return `Stand down on ${who} — recall it to a safe megaport, recharge warp to full, and wait for my next call. ${routing}`;
+    return pick([
+      `stand down on ${who}. recall to a safe megaport, top off warp, wait for my next call. ${routing}`,
+      `pull ${who} back. safe megaport, refuel, hold for orders. ${routing}`,
+      `wrap up ${who}. head to a safe megaport, recharge, standby. ${routing}`
+    ]);
   }
   const phrase = reasonPhrase(reason, snapshot);
-  return `Hey, break off whatever ${who} is doing — ${phrase}. Recall it to a safe megaport and recharge warp to full. ${routing} Then wait for orders.`;
+  return pick([
+    `break off ${who}, ${phrase}. send it to a safe megaport and refuel, then wait. ${routing}`,
+    `${who} needs to stop, ${phrase}. back to a megaport, top off, standby. ${routing}`,
+    `${who} is done for now, ${phrase}. recall to a safe megaport and refuel. ${routing}`
+  ]);
 };
 
 const buildStopPrompt = (spec, reason, snapshot) => {
   const who = shipPhrase(spec);
   const phrase = reasonPhrase(reason, snapshot);
   const routing = safeRoutingClause();
-  return `Nice, we hit the target on ${who} — ${phrase}. Park the task, recall ${who} to a safe megaport, and top off warp. ${routing} Await further orders.`;
+  return pick([
+    `nice, target hit on ${who} (${phrase}). park the task, recall to a safe megaport, refuel, standby. ${routing}`,
+    `we got it. ${who} hit ${phrase}. wrap the task, head to a megaport, top off, wait. ${routing}`,
+    `${who} finished, ${phrase}. park it at a safe megaport and standby. ${routing}`
+  ]);
 };
 
 /**

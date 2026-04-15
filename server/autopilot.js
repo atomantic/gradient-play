@@ -1,11 +1,54 @@
 import { getGameSnapshot, sendAssistantPrompt } from './cdp.js';
 import { observe as intelObserve, dangerousSectors } from './intel.js';
 
+const pick = (arr) => arr[Math.floor(Math.random() * arr.length)];
+
 const safeRoutingClause = () => {
   const bad = dangerousSectors();
   if (!bad.length) return '';
-  return ` Prefer a safe route around sectors ${bad.slice(0, 8).join(', ')} (lost ships there), but if warp's too low to reach a safe port, go to the closest megaport — stranded is worse than risky.`;
+  const list = bad.slice(0, 8).join(', ');
+  return pick([
+    ` try to avoid sectors ${list} (we lost ships there), but if warp is too low just go to the closest megaport, getting stranded is worse.`,
+    ` route around ${list} if you can, we lost ships in those sectors. but dont get stranded, any megaport is better than empty space.`,
+    ` steer clear of ${list} if possible (bad history there), otherwise closest megaport wins.`
+  ]);
 };
+
+const refuelPrompt = (ship, warp) => pick([
+  `hey, ${ship} is down to ${warp} warp. pull it off whatever its doing and send it to a safe megaport to recharge.` + safeRoutingClause(),
+  `${ship} fuel is low, ${warp} warp left. break off its task and route to a megaport to top off.` + safeRoutingClause(),
+  `fuel check on ${ship}, ${warp} warp. recall to a megaport and recharge before it strands.` + safeRoutingClause()
+]);
+
+const probeExplorePrompt = (probe, hops) => pick([
+  `${probe} is idle, send it out on explore and salvage. map unvisited sectors within ${hops} hops, check every sector for salvage on arrival (900s ttl), deposit credits at megaports. flee any combat. probes are disposable, deep space is fine, just dont linger in hostile sectors.`,
+  `put ${probe} back to work. explore and salvage duty, ${hops} hop radius of unmapped space. claim any salvage you find, bank credits whenever you dock. flee fights. probes are cheap so deep space is ok.`,
+  `${probe} needs a job. scout unmapped space out to ${hops} hops, grab salvage where you find it, drop credits at megaports. dont stick around in known hostile sectors.`
+]);
+
+const haulerTradePrompt = (hauler) => pick([
+  `${hauler} is idle, start a trade task. stick to fedspace or sectors right next to it, no deep neutral space. we cant replace a lost hauler right now. find a 2-3 hop NS loop and run it. refuel at megaports when warp gets low.` + safeRoutingClause(),
+  `put ${hauler} on a short NS trade loop, fedspace or adjacent only. no contested territory without a corsair to back us up. refuel as needed.` + safeRoutingClause(),
+  `${hauler} needs a run. 2-3 hop NS loop somewhere near fedspace, stay safe, refuel when warp dips.` + safeRoutingClause()
+]);
+
+const bankSweepPrompt = (excess, onHand, floor) => pick([
+  `next time you dock at a megaport, deposit ${excess} credits in the bank. we have ${onHand} on hand but only need about ${floor} for working capital. anything extra on the ship is just destruction risk.`,
+  `bank sweep time. sitting on ${onHand} on hand, ${excess} above our ${floor} working floor. drop the excess in the bank on the next megaport stop.`,
+  `lets bank the extra. ${excess} over what we need is just at risk. deposit on your next dock.`
+]);
+
+const upgradePrompt = (shipName, total, next) => pick([
+  `we have ${total} credits, enough for a ${next.name} at ${next.price}. when the ${shipName} next docks, trade it in and pick up the ${next.name}, then get back to trading.`,
+  `upgrade ready. ${total} credits means we can afford the ${next.name} (${next.price}). swap the ${shipName} for it at the next megaport.`,
+  `time to trade up. ${total} on hand + banked, and the ${next.name} is ${next.price}. next megaport, swap ${shipName} for the new hull and resume.`
+]);
+
+const primaryTradePrompt = (primary) => pick([
+  `start a short NS trade loop for the ${primary}, fedspace only. 2-3 hops, refuel when warp gets low. fedspace is pvp safe so just go for margin.`,
+  `put the ${primary} on a trade loop in fedspace. stick to federation sectors, pick the best NS margin you can find, refuel as needed.`,
+  `${primary} trade loop please, federation space only. short NS hops. no border or neutral zones.`
+]);
 
 const DEFAULTS = {
   pollIntervalSec: 60,
@@ -168,11 +211,7 @@ const decide = (snapshot) => {
     if (cfg.enabled.refuel && s.warpPower != null && s.warpPower < cfg.minWarp) {
       const key = `refuel:${s.name}`;
       if (canAct(key, cooldownMs)) {
-        out.push({
-          key,
-          ship: s.name,
-          text: `Heads up — the ${s.name} is down to ${s.warpPower} warp. Pull it off whatever it's doing, route to a safe megaport, and recharge before it gets stranded.${safeRoutingClause()}`
-        });
+        out.push({ key, ship: s.name, text: refuelPrompt(s.name, s.warpPower) });
       }
     }
   }
@@ -213,11 +252,7 @@ const decide = (snapshot) => {
     const probe = idleProbes[0];
     const key = `explore:${probe.name}`;
     if (canAct(key, cooldownMs)) {
-      out.push({
-        key,
-        ship: probe.name,
-        text: `The ${probe.name} is idle — put it on explore-and-salvage duty: map unvisited sectors within ${cfg.exploreMaxHops} hops, and on every sector arrival check for salvage and claim it (900s TTL). Deposit any credits at the next megaport. Flee any combat; refuel as needed. Probes are disposable scouts — venture into deep space, but don't linger in known-hostile sectors.`
-      });
+      out.push({ key, ship: probe.name, text: probeExplorePrompt(probe.name, cfg.exploreMaxHops) });
       remainingSlots -= 1;
     }
   }
@@ -228,11 +263,7 @@ const decide = (snapshot) => {
     if (!cfg.enabled.trade) break;
     const key = `trade:${hauler.name}`;
     if (!canAct(key, cooldownMs)) continue;
-    out.push({
-      key,
-      ship: hauler.name,
-      text: `The ${hauler.name} is idle — start an autonomous trade task. Stick to federation space or adjacent neutral sectors; do NOT venture deep into contested territory. We don't have a Corsair-tier defender yet, so a lost hauler is real loss. Find a profitable 2–3 hop NS commodity loop near its current sector and run it. Refuel at a megaport if warp dips low.${safeRoutingClause()}`
-    });
+    out.push({ key, ship: hauler.name, text: haulerTradePrompt(hauler.name) });
     remainingSlots -= 1;
   }
 
@@ -245,10 +276,7 @@ const decide = (snapshot) => {
     if (excess >= cfg.depositExcessOver) {
       const key = 'bank:sweep';
       if (canAct(key, cooldownMs)) {
-        out.push({
-          key,
-          text: `Next time you're at a megaport, deposit ${excess} credits in the bank — we're sitting on ${onHand} on-hand and only need about ${cfg.onHandFloor} for working capital. Extra credits are a destruction risk; the bank is safe.`
-        });
+        out.push({ key, text: bankSweepPrompt(excess, onHand, cfg.onHandFloor) });
       }
     }
   }
@@ -264,10 +292,7 @@ const decide = (snapshot) => {
     if (next && total >= next.price) {
       const key = `upgrade:${next.name}`;
       if (canAct(key, cooldownMs * 2)) {
-        out.push({
-          key,
-          text: `We've got ${total} credits — enough to trade up to a ${next.name} (${next.price}). When the ${ex.shipName} next hits a megaport, trade it in and buy the ${next.name}, then get back to trading in the new hull.`
-        });
+        out.push({ key, text: upgradePrompt(ex.shipName, total, next) });
       }
     }
   }
@@ -290,11 +315,7 @@ const decide = (snapshot) => {
     ) {
       const key = 'primary:trade';
       if (canAct(key, cfg.primaryDispatchCooldownSec * 1000)) {
-        out.push({
-          key,
-          ship: primary.name,
-          text: `Kick off a short NS trade loop for the ${primary.name}, strictly within federation space — we lack a Corsair-tier hull so no border or neutral sectors. 2–3 hops, refuel at a megaport whenever warp gets low. Fedspace is safe from PvP, so just optimize for margin.`
-        });
+        out.push({ key, ship: primary.name, text: primaryTradePrompt(primary.name) });
       }
     }
   }
