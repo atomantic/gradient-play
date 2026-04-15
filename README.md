@@ -33,7 +33,7 @@ Corp-scale play is where the companion earns its keep — autonomous Light Haule
                                                       └─────────────────────────┘
 ```
 
-- **CDP**: the companion attaches to an existing Chrome with `--remote-debugging-port=5556` (PortOS-managed by default). It does not launch its own browser — you log in once in that Chrome window.
+- **CDP**: the companion attaches to an existing Chrome with `--remote-debugging-port=5556` ([PortOS](https://github.com/atomantic/PortOS)-managed by default). It does not launch its own browser — you log in once in that Chrome window.
 - **Snapshot adapter** (`server/cdp.js`): extracts the player ship from the `<aside>` header (`FUEL cur/max`, `FGHT cur/max`, `SHLD cur/max`, most-recent movement row → current sector) and the corp fleet from `<div>`-with-`<dl>` ShipCards (three `<dd class="tabular-nums">` + three `.inline-flex` badges: sector, ship credits, active/inactive).
 - **Mission engine** (`server/missions.js`): a passive poll loop that only prompts on four events — kickoff, nudge, abort, stop. See [Mission model](#mission-model).
 
