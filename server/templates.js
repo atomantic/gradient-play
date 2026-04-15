@@ -54,11 +54,10 @@ const builtins = [
   {
     name: 'Kestrel: federation trade loop',
     spec: {
-      goal: 'Run a short, profitable NS trade loop entirely within federation space. Do not cross into border or neutral sectors — our Kestrel lacks the shields (150) and fighters (300) to survive combat, and we do not have a Corsair-tier replacement yet. Prioritize Neuro-Symbolics routes (best margin per cargo slot). Refuel at a megaport whenever warp gets low. If any port run takes us outside fedspace, abort the loop and find a new one.',
+      goal: 'Run a short, profitable NS trade loop entirely within federation space. Do not cross into border or neutral sectors — we lack a Corsair-tier replacement and any ship loss sets us back. Fedspace is PvP-safe, so just focus on finding the best NS margin. Prioritize Neuro-Symbolics routes (best margin per cargo slot). Refuel at a megaport whenever warp gets low. If any candidate route takes us outside fedspace, skip it and find another.',
       guardrails: [
         'STRICTLY federation space only — no border or neutral sectors',
         'Prioritize Neuro-Symbolics routes for margin',
-        'Flee immediately if attacked; do not engage',
         'Refuel before warp drops below 100'
       ],
       intervalSec: 30,

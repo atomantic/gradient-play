@@ -283,7 +283,7 @@ const decide = (snapshot) => {
         out.push({
           key,
           ship: primary.name,
-          text: `If the ${primary.name} doesn't already have a running task, kick off a short NS trade loop for it strictly within federation space (we still lack a Corsair-tier hull so no border/neutral sectors). 2–3 hops, refuel whenever warp gets low, flee any combat on sight.`
+          text: `If the ${primary.name} doesn't already have a running task, kick off a short NS trade loop for it strictly within federation space — we lack a Corsair-tier hull so no border or neutral sectors. 2–3 hops, refuel whenever warp gets low. Fedspace is safe from PvP, so just focus on margin.`
         });
       }
     }
