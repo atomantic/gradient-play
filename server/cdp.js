@@ -111,8 +111,20 @@ export const getGameSnapshot = async () => {
     const ships = [];
 
     // Player's own ship lives in an <aside> header with FUEL/FGHT/SHLD cur/max labels.
-    // Name is rendered in ".uppercase.text-white.font-semibold" WITHOUT "text-sm".
-    const playerNameEl = document.querySelector('.uppercase.text-white.font-semibold:not(.text-sm)');
+    // Name is rendered in ".uppercase.text-white.font-semibold" WITHOUT a text-size
+    // modifier. When docked, "PORT X" renders with .text-xs, so exclude that; also
+    // guard with the sibling-has-FUEL check and skip anything starting with "PORT".
+    const playerCandidates = Array.from(
+      document.querySelectorAll('.uppercase.text-white.font-semibold:not(.text-sm):not(.text-xs)')
+    );
+    const playerNameEl = playerCandidates.find((el) => {
+      const name = (el.innerText || '').trim();
+      if (!name || /^PORT\b/i.test(name)) return false;
+      // Only count it as the player ship if the surrounding block has the
+      // FUEL/FGHT/SHLD ratio text — a real ship card.
+      const container = el.closest('aside') || el.parentElement?.parentElement?.parentElement;
+      return container ? /FUEL\s+\d+\s*\/\s*\d+/i.test(container.innerText || '') : false;
+    });
     if (playerNameEl) {
       const aside = playerNameEl.closest('aside') || playerNameEl.closest('header') || playerNameEl.parentElement;
       const asideText = aside?.innerText || '';
