@@ -20,7 +20,9 @@ const formatEntry = (e) => {
     if (s.sector != null) bits.push(`sec=${s.sector}`);
     if (s.warpPower != null) bits.push(`warp=${s.warpPower}`);
     if (s.creditsOnHand != null) bits.push(`cred=${s.creditsOnHand}`);
-    if (e.idleSec != null) bits.push(`idle=${e.idleSec}s`);
+    if (e.tasksWorking) bits.push(`engine=on`);
+    if (e.activity?.length) bits.push(`active[${e.activity.join(',')}]`);
+    else if (e.idleSec != null) bits.push(`idle=${e.idleSec}s`);
     return 'poll ' + bits.join(' · ');
   }
   if (e.type === 'error') return 'error: ' + e.error;

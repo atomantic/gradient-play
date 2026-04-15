@@ -18,50 +18,127 @@ const evaluateCondition = (cond, snapshot) => {
   }
 };
 
+const shipPhrase = (spec) =>
+  spec.targetShip ? `the ${spec.targetShip}` : 'the fleet';
+
 const buildKickoffPrompt = (spec) => {
-  const parts = [];
-  const prefix = spec.targetShip ? `Using ${spec.targetShip}: ` : '';
-  parts.push(prefix + spec.goal);
-  if (spec.guardrails?.length) {
-    parts.push('Guardrails: ' + spec.guardrails.join('; '));
+  const lines = [];
+  if (spec.targetShip) {
+    lines.push(`Put ${shipPhrase(spec)} on this: ${spec.goal}`);
+  } else {
+    lines.push(spec.goal);
   }
-  return parts.join('\n');
+  if (spec.guardrails?.length) {
+    lines.push('A few ground rules: ' + spec.guardrails.join('; ') + '.');
+  }
+  return lines.join(' ');
 };
 
 const buildNudgePrompt = (spec) => {
-  const who = spec.targetShip ? `${spec.targetShip}` : 'the fleet';
-  return `Status check on ${who}. If the previous task has stopped or timed out, resume it without losing progress: ${spec.goal.slice(0, 200)}`;
+  const who = shipPhrase(spec);
+  return `How's ${who} doing? If that task stalled out or timed out, go ahead and spin it back up — same goal as before.`;
 };
 
-const buildAbortPrompt = (spec, reason) => {
-  const who = spec.targetShip ? spec.targetShip : 'the fleet';
-  return `Abort current activity for ${who}. Reason: ${reason}. Stop trading/exploring and return to the nearest megaport to recharge. Await further orders.`;
+const reasonPhrase = (reason, snapshot) => {
+  // Translate "warpPower<50" style into "warp is at 45"
+  const m = reason.match(/^([a-zA-Z]+)(<=|>=|==|<|>)(-?\d+)/);
+  if (!m || !snapshot) return reason;
+  const [, metric, op, value] = m;
+  const cur = snapshot?.extracted?.[metric];
+  const labels = {
+    warpPower: 'warp',
+    credits: 'credits on hand',
+    creditsOnHand: 'credits on hand',
+    creditsBank: 'credits in the bank',
+    fighters: 'fighters',
+    shields: 'shields',
+    cargo: 'cargo'
+  };
+  const label = labels[metric] || metric;
+  if (cur != null) return `${label} is at ${cur} (target was ${op} ${value})`;
+  return `${label} ${op} ${value}`;
 };
 
-const buildStopPrompt = (spec, reason) => {
-  const who = spec.targetShip ? spec.targetShip : 'the fleet';
-  return `Goal reached for ${who} (${reason}). Pause the current task. Await further orders.`;
+const buildAbortPrompt = (spec, reason, snapshot) => {
+  const who = shipPhrase(spec);
+  if (reason === 'user-abort' || reason === 'user') {
+    return `Stand down on ${who} — park at the nearest megaport and wait for my next call.`;
+  }
+  const phrase = reasonPhrase(reason, snapshot);
+  return `Hey, break off whatever ${who} is doing — ${phrase}. Head to the nearest megaport, recharge, and wait for orders.`;
+};
+
+const buildStopPrompt = (spec, reason, snapshot) => {
+  const who = shipPhrase(spec);
+  const phrase = reasonPhrase(reason, snapshot);
+  return `Nice, we hit the target on ${who} — ${phrase}. Park the task and wait for my next call.`;
 };
 
 /**
- * Parse the most recent assistant message timestamp from the chat scrape.
- * Messages render as "[HH:MM:SS] ASSISTANT:\n..." in lastMessages (newest first).
- * Returns epoch ms of the most recent assistant message today, or null.
+ * Parse the most recent chat timestamp — any event type (ASSISTANT, FUNCTION CALL, USER).
+ * Messages render as "[HH:MM:SS] <TYPE>:..." in lastMessages (newest first).
  */
-const lastAssistantMs = (snapshot) => {
+const lastChatMs = (snapshot) => {
   const msgs = snapshot?.extracted?.lastMessages || [];
   for (const m of msgs) {
-    const match = m?.match(/\[(\d{2}):(\d{2}):(\d{2})\]\s*ASSISTANT/i);
+    const match = m?.match(/\[(\d{2}):(\d{2}):(\d{2})\]/);
     if (match) {
       const now = new Date();
       const stamp = new Date(now);
       stamp.setHours(Number(match[1]), Number(match[2]), Number(match[3]), 0);
-      // If the stamp is in the future (crossed midnight), subtract a day.
       if (stamp.getTime() > now.getTime() + 60_000) stamp.setDate(stamp.getDate() - 1);
       return stamp.getTime();
     }
   }
   return null;
+};
+
+/**
+ * Activity signals to detect when the agent is actually working.
+ *
+ * - Any task card with ENGINE STATUS: WORKING (authoritative — the game's own flag)
+ * - Target corp ship badge showing ACTIVE
+ * - Stat deltas since last poll (warp/sector/cargo/credits changed → ship is moving or trading)
+ * - Recent chat event
+ *
+ * Returns { activeAt: ms, reasons: [...], stable: bool }.
+ */
+const detectActivity = (snapshot, mission) => {
+  const reasons = [];
+  const ex = snapshot?.extracted || {};
+  const now = Date.now();
+
+  if (ex.anyTaskWorking) reasons.push('engine:working');
+
+  if (mission.spec.targetShip) {
+    const ship = (ex.ships || []).find((s) => s.name === mission.spec.targetShip);
+    if (ship?.active === true) reasons.push(`ship:${ship.name}:active`);
+  }
+
+  const currentStats = {
+    sector: ex.sector,
+    warpPower: ex.warpPower,
+    cargo: ex.cargo,
+    credits: ex.credits,
+    shipCredits: ex.shipCredits
+  };
+  if (mission.prevStats) {
+    for (const k of Object.keys(currentStats)) {
+      if (currentStats[k] != null && mission.prevStats[k] != null && currentStats[k] !== mission.prevStats[k]) {
+        reasons.push(`stat:${k}:${mission.prevStats[k]}→${currentStats[k]}`);
+      }
+    }
+  }
+  mission.prevStats = currentStats;
+
+  const chatMs = lastChatMs(snapshot);
+  if (chatMs && now - chatMs < 120_000) {
+    reasons.push(`chat:${Math.round((now - chatMs) / 1000)}s`);
+  }
+
+  const active = reasons.length > 0;
+  if (active) mission.lastActivityAt = now;
+  return { active, reasons };
 };
 
 const snapshotForShip = (snapshot, targetShip) => {
@@ -90,11 +167,14 @@ const appendLog = (mission, entry) => {
 };
 
 /**
- * A tick is a passive snapshot + condition check. Prompts are only sent on:
- *   - kickoff (first tick)
- *   - abort condition fires
- *   - stop condition fires
- *   - assistant has been idle longer than spec.nudgeAfterIdleSec (5-min game timeout)
+ * A tick is a passive snapshot + condition check. Prompts only fire on:
+ *   - kickoff (once)
+ *   - abort / stop condition
+ *   - all activity signals silent for ≥ spec.nudgeAfterIdleSec
+ *
+ * "Activity" = ENGINE STATUS: WORKING on any task, target corp ship ACTIVE,
+ * stat deltas since last poll, or recent chat event. While any is present,
+ * the idle clock resets.
  */
 const runTick = async (mission) => {
   if (mission.status !== 'running') return;
@@ -104,15 +184,25 @@ const runTick = async (mission) => {
   const shipView = snapshotForShip(rawSnapshot, spec.targetShip);
   const scoped = { ok: rawSnapshot?.ok, extracted: shipView };
 
-  const assistantMs = lastAssistantMs(rawSnapshot);
-  const idleSec = assistantMs ? Math.round((Date.now() - assistantMs) / 1000) : null;
-  appendLog(mission, { type: 'tick', snapshot: shipView, idleSec });
+  const activity = detectActivity(rawSnapshot, mission);
+  const idleSec = mission.lastActivityAt
+    ? Math.round((Date.now() - mission.lastActivityAt) / 1000)
+    : Math.round((Date.now() - mission.startedAt) / 1000);
+
+  appendLog(mission, {
+    type: 'tick',
+    snapshot: shipView,
+    idleSec,
+    activity: activity.active ? activity.reasons : null,
+    taskCount: rawSnapshot?.extracted?.tasks?.length,
+    tasksWorking: rawSnapshot?.extracted?.anyTaskWorking
+  });
 
   if (spec.abortWhen) {
     for (const cond of spec.abortWhen) {
       if (evaluateCondition(cond, scoped)) {
         const reason = `${cond.metric}${cond.op}${cond.value}`;
-        const prompt = buildAbortPrompt(spec, reason);
+        const prompt = buildAbortPrompt(spec, reason, scoped);
         const send = await sendAssistantPrompt(prompt);
         appendLog(mission, { type: 'abort', reason, prompt, send });
         mission.status = 'aborted';
@@ -126,7 +216,7 @@ const runTick = async (mission) => {
     for (const cond of spec.stopWhen) {
       if (evaluateCondition(cond, scoped)) {
         const reason = `${cond.metric}${cond.op}${cond.value}`;
-        const prompt = buildStopPrompt(spec, reason);
+        const prompt = buildStopPrompt(spec, reason, scoped);
         const send = await sendAssistantPrompt(prompt);
         appendLog(mission, { type: 'stop', reason, prompt, send });
         mission.status = 'completed';
@@ -140,16 +230,18 @@ const runTick = async (mission) => {
     const prompt = buildKickoffPrompt(spec);
     const send = await sendAssistantPrompt(prompt);
     mission.lastPromptAt = Date.now();
+    mission.lastActivityAt = Date.now();
     appendLog(mission, { type: 'kickoff', text: prompt, send });
   } else if (
     spec.nudgeAfterIdleSec > 0 &&
-    idleSec != null &&
+    !activity.active &&
     idleSec >= spec.nudgeAfterIdleSec &&
     Date.now() - (mission.lastPromptAt || 0) >= spec.nudgeAfterIdleSec * 1000
   ) {
     const prompt = buildNudgePrompt(spec);
     const send = await sendAssistantPrompt(prompt);
     mission.lastPromptAt = Date.now();
+    mission.lastActivityAt = Date.now();
     appendLog(mission, { type: 'nudge', idleSec, text: prompt, send });
   }
 
@@ -184,6 +276,8 @@ export const createMission = async (spec) => {
     status: 'running',
     tickCount: 0,
     startedAt: Date.now(),
+    lastActivityAt: Date.now(),
+    prevStats: null,
     endedAt: null,
     lastSnapshot: null,
     log: [],
@@ -206,7 +300,7 @@ export const abortMission = async (id) => {
   if (mission.timer) clearTimeout(mission.timer);
   mission.status = 'aborted';
   mission.endedAt = Date.now();
-  const prompt = buildAbortPrompt(mission.spec, 'user-abort');
+  const prompt = buildAbortPrompt(mission.spec, 'user-abort', mission.lastSnapshot);
   const send = await sendAssistantPrompt(prompt).catch((e) => ({ ok: false, error: e.message }));
   appendLog(mission, { type: 'abort', reason: 'user', prompt, send });
   return { ok: true };

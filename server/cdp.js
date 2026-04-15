@@ -193,6 +193,35 @@ export const getGameSnapshot = async () => {
     const corpHeader = document.querySelector('header')?.innerText?.split('\n')[0]?.trim();
     if (corpHeader && corpHeader.length < 100) extracted.corpHeader = corpHeader;
 
+    // Task cards — each autonomous task renders a card containing "ENGINE STATUS: <state>".
+    // The card itself is a sibling of the engine-status text; walking up finds the <div class="group relative flex-1 min-w-0 ...">.
+    const taskTextNodes = Array.from(document.querySelectorAll('*')).filter((e) => {
+      const own = Array.from(e.childNodes).filter((c) => c.nodeType === 3).map((c) => c.textContent).join(' ');
+      return /ENGINE\s*STATUS/i.test(own);
+    });
+    const seenCards = new Set();
+    const tasks = [];
+    for (const node of taskTextNodes) {
+      let card = node;
+      for (let i = 0; i < 8 && card.parentElement; i++) {
+        card = card.parentElement;
+        const t = card.innerText || '';
+        if (/ENGINE\s*STATUS/i.test(t) && t.length > 30 && t.length < 600) break;
+      }
+      if (seenCards.has(card)) continue;
+      seenCards.add(card);
+      const text = (card.innerText || '').replace(/\s+/g, ' ').trim();
+      const statusMatch = text.match(/ENGINE\s*STATUS:\s*([A-Z]+)/i);
+      const status = statusMatch ? statusMatch[1].toUpperCase() : null;
+      const description = text.replace(/\s*ENGINE\s*STATUS:.*$/i, '').trim();
+      tasks.push({ description, status, working: status === 'WORKING' });
+    }
+    extracted.tasks = tasks;
+    extracted.anyTaskWorking = tasks.some((t) => t.working);
+
+    const slotsMatch = (document.body?.innerText || '').match(/(\d+)\s*\/\s*(\d+)\s*SLOTS?\s*USED/i);
+    if (slotsMatch) extracted.taskSlots = { used: Number(slotsMatch[1]), total: Number(slotsMatch[2]) };
+
     const chatScroll = document.querySelector('[data-slot="scroll-area-viewport"], .scroll-area-viewport, [data-radix-scroll-area-viewport]');
     const lastMessages = [];
     if (chatScroll) {
