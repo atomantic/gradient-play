@@ -6,6 +6,7 @@ export const CredentialsPanel = () => {
   const [status, setStatus] = useState(null);
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
+  const [character, setCharacter] = useState('');
   const [editing, setEditing] = useState(false);
   const [msg, setMsg] = useState(null);
 
@@ -13,6 +14,7 @@ export const CredentialsPanel = () => {
     const s = await fetch('/api/credentials').then((r) => r.json());
     setStatus(s);
     if (s.email) setEmail(s.email);
+    if (s.character) setCharacter(s.character);
   };
 
   useEffect(() => { refresh(); }, []);
@@ -23,7 +25,7 @@ export const CredentialsPanel = () => {
     const res = await fetch('/api/credentials', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ email, password })
+      body: JSON.stringify({ email, password, character: character || null })
     }).then((r) => r.json());
     if (res.ok) {
       setMsg(`stored in ${res.backend}`);
@@ -59,6 +61,9 @@ export const CredentialsPanel = () => {
       {status?.configured && !editing ? (
         <>
           <div className="text-sm text-slate-200 font-mono break-all">{status.email}</div>
+          <div className="text-[11px] text-slate-500">
+            character: <span className="text-cyan-300 font-mono">{status.character || '(none)'}</span>
+          </div>
           <div className="flex items-center gap-2 pt-1">
             <button onClick={login}
               className="px-2 py-1 rounded bg-cyan-600 hover:bg-cyan-500 text-white text-xs flex items-center gap-1">
@@ -82,6 +87,9 @@ export const CredentialsPanel = () => {
           <input type="password" value={password} onChange={(e) => setPassword(e.target.value)}
             placeholder="password"
             className="w-full bg-slate-950 border border-slate-800 rounded px-2 py-1 text-sm font-mono" />
+          <input type="text" value={character} onChange={(e) => setCharacter(e.target.value)}
+            placeholder="character name (e.g. antic)"
+            className="w-full bg-slate-950 border border-slate-800 rounded px-2 py-1 text-sm" />
           <div className="flex items-center gap-2">
             <button onClick={save}
               className="px-2 py-1 rounded bg-cyan-600 hover:bg-cyan-500 text-white text-xs">

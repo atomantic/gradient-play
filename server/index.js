@@ -1,5 +1,5 @@
 import express from 'express';
-import { connectGamePage, getGameSnapshot, sendAssistantPrompt, getConnectionStatus, loginIfNeeded } from './cdp.js';
+import { connectGamePage, getGameSnapshot, sendAssistantPrompt, getConnectionStatus, loginIfNeeded, selectCharacterIfNeeded } from './cdp.js';
 import { createMission, listMissions, getMission, abortMission, subscribeMissionLog } from './missions.js';
 import { loadMissionTemplates, saveMissionTemplate, deleteMissionTemplate } from './templates.js';
 import { credentialsStatus, setCredentials, clearCredentials } from './credentials.js';
@@ -132,10 +132,17 @@ app.get('/api/credentials', (_req, res) => {
 });
 
 app.post('/api/credentials', (req, res) => {
-  const { email, password } = req.body || {};
+  const { email, password, character } = req.body || {};
   if (!email || !password) return res.status(400).json({ ok: false, error: 'email and password required' });
-  const result = setCredentials({ email, password });
-  log('🔐', 'Credentials stored', { backend: result.backend, email });
+  const result = setCredentials({ email, password, character });
+  log('🔐', 'Credentials stored', { backend: result.backend, email, character });
+  res.json(result);
+});
+
+app.post('/api/cdp/select-character', async (req, res) => {
+  const { name } = req.body || {};
+  const result = await selectCharacterIfNeeded(name);
+  log(result.ok ? '🧑' : '⚠️', `Character select ${result.via || result.error}`);
   res.json(result);
 });
 

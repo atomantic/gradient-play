@@ -273,44 +273,78 @@ export const sendAssistantPrompt = async (text) => {
 };
 
 /**
- * Detect login screen, fill credentials from keychain/file, submit.
- * Returns { ok, via, error }. Idempotent — returns ok:true if already logged in.
+ * Click the character tile matching `name` on the character_select screen.
+ * Tiles are [role="button"] containing an uppercase span with the character name.
+ * Returns { ok, error } — ok:true if selection succeeded or no dialog was showing.
+ */
+export const selectCharacterIfNeeded = async (name) => {
+  if (!name) return { ok: true, via: 'no-character-configured' };
+  const page = await withPage();
+
+  const dialogVisible = await page.locator('[role="dialog"]:has-text("Select Character"), :text("Select Character")').first().isVisible().catch(() => false);
+  if (!dialogVisible) {
+    // Maybe the tiles are visible without the dialog matcher — fall through to locator query
+  }
+
+  const target = name.trim();
+  const re = new RegExp(`^\\s*${target.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\s*$`, 'i');
+
+  const tile = page.locator('[role="button"]').filter({ hasText: re }).first();
+  const count = await tile.count();
+  if (!count) return { ok: true, via: 'no-tile-shown' };
+  if (!(await tile.isVisible().catch(() => false))) return { ok: true, via: 'tile-hidden' };
+
+  await tile.click();
+  // After click, the dialog dismisses. Wait briefly for transition.
+  await page.waitForTimeout(500);
+  return { ok: true, via: `clicked:${target}` };
+};
+
+/**
+ * Detect login screen, fill credentials from keychain/file, submit, then pick
+ * the configured character tile if the character_select dialog appears.
  */
 export const loginIfNeeded = async () => {
   const page = await withPage();
   const emailInput = page.locator('input[data-slot="input"][type="email"], input[type="email"]').first();
   const hasEmailField = await emailInput.count() && await emailInput.isVisible().catch(() => false);
 
-  if (!hasEmailField) {
+  const creds = getCredentials();
+  let loginVia = 'already-authed';
+
+  if (hasEmailField) {
+    if (!creds) return { ok: false, error: 'no credentials stored — set them first' };
+    const email = page.locator('input[data-slot="input"][type="email"], input[type="email"]').first();
+    const password = page.locator('input[data-slot="input"][type="password"], input[type="password"]').first();
+    if (!(await email.count()) || !(await password.count())) {
+      return { ok: false, error: 'login form not found' };
+    }
+    await email.click();
+    await email.fill(creds.email);
+    await password.click();
+    await password.fill(creds.password);
+    const submit = page.locator('button:has-text("Join"), [data-slot="button"]:has-text("Join"), button[type="submit"]').first();
+    if (await submit.count()) await submit.click();
+    else await password.press('Enter');
+    await page.waitForSelector('input[type="email"]', { state: 'hidden', timeout: 8000 }).catch(() => {});
+    loginVia = 'submitted';
+  } else {
     const signInBtn = page.locator('button:has-text("Sign In"), [data-slot="button"]:has-text("Sign In")').first();
     if (await signInBtn.count() && await signInBtn.isVisible().catch(() => false)) {
       await signInBtn.click();
       await page.waitForSelector('input[type="email"]', { timeout: 5000 }).catch(() => {});
-    } else {
-      return { ok: true, via: 'already-authed' };
+      return loginIfNeeded(); // recurse once the form is visible
     }
   }
 
-  const creds = getCredentials();
-  if (!creds) return { ok: false, error: 'no credentials stored — set them first' };
-
-  const email = page.locator('input[data-slot="input"][type="email"], input[type="email"]').first();
-  const password = page.locator('input[data-slot="input"][type="password"], input[type="password"]').first();
-  if (!(await email.count()) || !(await password.count())) {
-    return { ok: false, error: 'login form not found' };
-  }
-  await email.click();
-  await email.fill(creds.email);
-  await password.click();
-  await password.fill(creds.password);
-
-  const submit = page.locator('button:has-text("Join"), [data-slot="button"]:has-text("Join"), button[type="submit"]').first();
-  if (await submit.count()) {
-    await submit.click();
-  } else {
-    await password.press('Enter');
+  // Whether or not we just submitted, check for the character-select step.
+  const charName = creds?.character;
+  if (charName) {
+    // Wait briefly for the dialog to render after login.
+    await page.waitForTimeout(600);
+    const charResult = await selectCharacterIfNeeded(charName);
+    return { ok: true, via: loginVia, character: charResult.via };
   }
 
-  await page.waitForSelector('input[type="email"]', { state: 'hidden', timeout: 8000 }).catch(() => {});
-  return { ok: true, via: 'submitted' };
+  return { ok: true, via: loginVia };
 };

@@ -26,6 +26,7 @@ const KEY_DIR = path.join(os.homedir(), '.config', 'gradient-play');
 const KEY_FILE = path.join(KEY_DIR, 'key');
 const KEYCHAIN_SERVICE = 'gradient-play';
 const ACCOUNT_MARKER = path.join(DATA_DIR, 'account.txt');
+const CHARACTER_FILE = path.join(DATA_DIR, 'character.txt');
 
 const isDarwin = process.platform === 'darwin';
 
@@ -81,11 +82,11 @@ const ensureKey = () => {
   return fs.readFileSync(KEY_FILE);
 };
 
-const fileSet = (email, password) => {
+const fileSet = (email, password, character) => {
   const key = ensureKey();
   const iv = crypto.randomBytes(12);
   const cipher = crypto.createCipheriv('aes-256-gcm', key, iv);
-  const plaintext = JSON.stringify({ email, password });
+  const plaintext = JSON.stringify({ email, password, character });
   const enc = Buffer.concat([cipher.update(plaintext, 'utf8'), cipher.final()]);
   const tag = cipher.getAuthTag();
   fs.mkdirSync(DATA_DIR, { recursive: true });
@@ -109,7 +110,21 @@ const fileDelete = () => {
   if (fs.existsSync(ENC_FILE)) fs.unlinkSync(ENC_FILE);
 };
 
-export const setCredentials = ({ email, password }) => {
+const readCharacter = () => {
+  if (!fs.existsSync(CHARACTER_FILE)) return null;
+  return fs.readFileSync(CHARACTER_FILE, 'utf8').trim() || null;
+};
+
+const writeCharacter = (character) => {
+  fs.mkdirSync(DATA_DIR, { recursive: true });
+  if (character) {
+    fs.writeFileSync(CHARACTER_FILE, character, { mode: 0o600 });
+  } else if (fs.existsSync(CHARACTER_FILE)) {
+    fs.unlinkSync(CHARACTER_FILE);
+  }
+};
+
+export const setCredentials = ({ email, password, character }) => {
   if (!email || !password) throw new Error('email and password required');
   const existing = readAccount();
   if (existing && existing !== email) {
@@ -118,21 +133,30 @@ export const setCredentials = ({ email, password }) => {
   if (isDarwin) {
     keychainSet(email, password);
   } else {
-    fileSet(email, password);
+    fileSet(email, password, character);
   }
   writeAccount(email);
+  if (character !== undefined) writeCharacter(character);
   return { ok: true, backend: isDarwin ? 'keychain' : 'file' };
+};
+
+export const setCharacter = (character) => {
+  writeCharacter(character);
+  return { ok: true };
 };
 
 export const getCredentials = () => {
   const email = readAccount();
   if (!email) return null;
+  const character = readCharacter();
   if (isDarwin) {
     const password = keychainGet(email);
     if (!password) return null;
-    return { email, password };
+    return { email, password, character };
   }
-  return fileGet();
+  const creds = fileGet();
+  if (!creds) return null;
+  return { ...creds, character: character || creds.character || null };
 };
 
 export const clearCredentials = () => {
@@ -140,15 +164,18 @@ export const clearCredentials = () => {
   if (email && isDarwin) keychainDelete(email);
   else fileDelete();
   clearAccount();
+  writeCharacter(null);
   return { ok: true };
 };
 
 export const credentialsStatus = () => {
   const email = readAccount();
+  const character = readCharacter();
   const backend = isDarwin ? 'keychain' : 'file';
   return {
     configured: !!email && !!getCredentials(),
     email: email || null,
+    character: character || null,
     backend
   };
 };
