@@ -62,6 +62,22 @@ const builtins = [
     }
   },
   {
+    name: 'Probe: salvage patrol',
+    spec: {
+      goal: 'Patrol unmapped space hunting for salvage drops from recent combat. Whenever you arrive in a sector, check for salvage — if there is any, claim it with salvage_collect (it has a 900s TTL so speed matters). Any credits picked up must be deposited in the bank at the next megaport visit — do not carry loose credits on the probe. Refuel whenever you need to. Between salvage finds, keep exploring new sectors to widen the search. You have no shields and only 10 fighters, so flee any combat immediately.',
+      guardrails: [
+        'Flee every combat encounter — no exceptions',
+        'Deposit all credits at every megaport visit',
+        'Refuel before warp power drops below 80',
+        'Prefer unmapped sectors to maximize salvage hit rate',
+        'Do not engage garrisons or toll gates'
+      ],
+      intervalSec: 30,
+      nudgeAfterIdleSec: 270,
+      abortWhen: [{ metric: 'warpPower', op: '<', value: 30 }]
+    }
+  },
+  {
     name: 'Light Hauler: short trade loop',
     spec: {
       goal: 'Start an autonomous trade task on this Light Hauler: identify a 2–3 hop profitable loop near its current sector and run it continuously. Steer the task if port depletion reduces margins below 20 cr/unit.',
