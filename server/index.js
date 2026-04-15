@@ -4,6 +4,7 @@ import { createMission, listMissions, getMission, abortMission, subscribeMission
 import { loadMissionTemplates, saveMissionTemplate, deleteMissionTemplate } from './templates.js';
 import { credentialsStatus, setCredentials, clearCredentials } from './credentials.js';
 import { startAutopilot, stopAutopilot, getAutopilotState, subscribeAutopilotLog } from './autopilot.js';
+import { getIntel, addManualEvent, deleteEvent, clearIntel, observe as intelObserve } from './intel.js';
 
 const PORT = Number(process.env.PORT || 5570);
 const HOST = process.env.HOST || '127.0.0.1';
@@ -102,6 +103,32 @@ app.get('/api/missions/:id/stream', (req, res) => {
 
 app.get('/api/autopilot', (_req, res) => {
   res.json(getAutopilotState());
+});
+
+app.get('/api/intel', (_req, res) => {
+  res.json(getIntel());
+});
+
+app.post('/api/intel/events', (req, res) => {
+  const { type, ship, attacker, sector, note } = req.body || {};
+  const ev = addManualEvent({ type, ship, attacker, sector: sector != null ? Number(sector) : null, note });
+  log('📜', 'Intel event logged', { type: ev.type, attacker, sector });
+  res.json(ev);
+});
+
+app.delete('/api/intel/events/:id', (req, res) => {
+  res.json(deleteEvent(req.params.id));
+});
+
+app.delete('/api/intel', (_req, res) => {
+  clearIntel();
+  res.json({ ok: true });
+});
+
+app.post('/api/intel/scan', async (_req, res) => {
+  const snap = await (await import('./cdp.js')).getGameSnapshot();
+  const added = intelObserve(snap);
+  res.json({ ok: true, added });
 });
 
 app.post('/api/autopilot/start', (req, res) => {

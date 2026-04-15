@@ -160,6 +160,7 @@ export const getGameSnapshot = async () => {
       const name = card.querySelector('.text-sm.uppercase.text-white.font-semibold')?.innerText?.trim();
       const dds = card.querySelectorAll('dl dd.tabular-nums');
       const badges = card.querySelectorAll('.inline-flex');
+      const cardText = (card.innerText || '').toUpperCase();
       const stateTxt = Array.from(badges).map((b) => b.innerText).join(' ').toUpperCase();
       ships.push({
         name,
@@ -169,7 +170,8 @@ export const getGameSnapshot = async () => {
         shields: toNum(dds[2]?.innerText),
         sector: badges[0] ? toNum(badges[0].innerText) : null,
         credits: badges[1] ? toNum(badges[1].innerText) : null,
-        active: stateTxt.includes('ACTIVE') && !stateTxt.includes('INACTIVE')
+        active: stateTxt.includes('ACTIVE') && !stateTxt.includes('INACTIVE'),
+        destroyed: /DESTROYED/.test(cardText)
       });
     }
 

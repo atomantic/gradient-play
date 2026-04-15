@@ -8,6 +8,7 @@ import { MissionDetail } from './components/MissionDetail.jsx';
 import { DirectChat } from './components/DirectChat.jsx';
 import { CredentialsPanel } from './components/CredentialsPanel.jsx';
 import { AutopilotPanel } from './components/AutopilotPanel.jsx';
+import { IntelPanel } from './components/IntelPanel.jsx';
 
 export default function App() {
   const [status, setStatus] = useState(null);
@@ -16,7 +17,7 @@ export default function App() {
   const [selectedId, setSelectedId] = useState(null);
   const [templates, setTemplates] = useState([]);
   const [error, setError] = useState(null);
-  const [rightTab, setRightTab] = useState('mission'); // 'mission' | 'autopilot'
+  const [rightTab, setRightTab] = useState('mission'); // 'mission' | 'autopilot' | 'intel'
 
   const refresh = async () => {
     try {
@@ -110,12 +111,18 @@ export default function App() {
               className={`px-3 py-1 rounded-t border-b-2 ${rightTab === 'autopilot' ? 'border-emerald-500 text-emerald-300' : 'border-transparent text-slate-500 hover:text-slate-300'}`}>
               Autopilot
             </button>
+            <button onClick={() => setRightTab('intel')}
+              className={`px-3 py-1 rounded-t border-b-2 ${rightTab === 'intel' ? 'border-rose-500 text-rose-300' : 'border-transparent text-slate-500 hover:text-slate-300'}`}>
+              Intel
+            </button>
           </div>
           <div className="flex-1 min-h-0">
             {rightTab === 'mission' ? (
               <MissionDetail missionId={selectedId} onAbort={handleAbort} />
-            ) : (
+            ) : rightTab === 'autopilot' ? (
               <AutopilotPanel />
+            ) : (
+              <IntelPanel />
             )}
           </div>
         </section>

@@ -1,4 +1,5 @@
 import { getGameSnapshot, sendAssistantPrompt } from './cdp.js';
+import { observe as intelObserve } from './intel.js';
 
 const DEFAULTS = {
   pollIntervalSec: 60,
@@ -237,6 +238,12 @@ const runTick = async () => {
   try {
     const snapshot = await getGameSnapshot();
     state.lastSnapshot = snapshot;
+
+    // Threat intel — detect destructions / hostile chat events.
+    const intelEvents = intelObserve(snapshot);
+    for (const ev of intelEvents) {
+      appendLog({ type: 'intel', intelType: ev.type, ship: ev.ship, attacker: ev.attacker, sector: ev.sector });
+    }
 
     // Chat-event scan: if the assistant reported "task ended after max steps"
     // (or similar) for a specific ship, clear that ship's cooldown keys so
