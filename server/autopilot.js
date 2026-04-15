@@ -10,6 +10,7 @@ const DEFAULTS = {
   exploreMaxHops: 40,
   considerUpgrades: true,
   upgradeCreditsThreshold: 100000, // remind the agent to check upgrades when total hits this
+  corpTaskCap: 3,                  // game enforces 3 concurrent corp-ship tasks
   enabled: {
     refuel: true,
     explore: true,
@@ -27,8 +28,6 @@ const state = {
   log: [],
   lastDecisionAt: new Map(),
   seenEventKeys: new Set(),
-  corpTasksCapped: false,      // set when agent says we've hit the 3-task cap
-  corpTasksCappedAt: null,
   lastSnapshot: null,
   subscribers: new Set()
 };
@@ -42,26 +41,19 @@ const EVENT_PATTERNS = [
   {
     type: 'task-max-steps',
     re: /the (\w+)(?:['\u2019]s)?\s*(?:current\s+)?(?:autonomous\s+)?task\s+(?:has\s+)?ended\s+after\s+reaching\s+its\s+maximum\s+allowed\s+steps/i,
-    clearsCooldownFor: ['trade', 'explore'],
-    clearsCap: true
+    clearsCooldownFor: ['trade', 'explore']
   },
   {
     type: 'task-aborted',
     re: /(?:the\s+)?(\w+)(?:['\u2019]s)?\s+(?:autonomous\s+)?task\s+(?:has\s+been\s+|was\s+)?aborted/i,
-    clearsCooldownFor: ['trade', 'explore'],
-    clearsCap: true
+    clearsCooldownFor: ['trade', 'explore']
   },
   {
     type: 'task-completed',
     re: /(?:the\s+)?(\w+)(?:['\u2019]s)?\s+(?:autonomous\s+)?task\s+(?:has\s+)?completed/i,
-    clearsCooldownFor: ['trade', 'explore'],
-    clearsCap: true
+    clearsCooldownFor: ['trade', 'explore']
   }
 ];
-
-// Messages about the corp-task cap — no ship captured, so handled separately.
-const CAP_HIT_RE = /maximum\s+of\s+(?:three|\d+)\s+corporation\s+ship\s+tasks?\s+(?:has\s+been|is)\s+reached/i;
-const CAP_RELEASED_RE = /(?:corp(?:oration)?\s+)?task\s+(?:slot|cap)\s+(?:is\s+)?(?:now\s+)?(?:available|open|freed)/i;
 
 const matchShipByRole = (roleWord = '', ships = []) => {
   const w = roleWord.toLowerCase();
@@ -86,22 +78,6 @@ const parseAssistantEvents = (snapshot) => {
     const msgTs = tsMatch ? tsMatch[1] : null;
     // Only parse assistant prose (FUNCTION CALL / USER lines are noise here).
     if (!/ASSISTANT[:\s]/i.test(m)) continue;
-
-    // Corp-task cap reached — set sticky flag so decide() stops dispatching new tasks.
-    if (CAP_HIT_RE.test(m)) {
-      const key = `cap-hit:${msgTs || m.slice(0, 40)}`;
-      if (!state.seenEventKeys.has(key)) {
-        state.seenEventKeys.add(key);
-        state.corpTasksCapped = true;
-        state.corpTasksCappedAt = Date.now();
-        events.push({
-          type: 'cap-hit',
-          msgTs,
-          snippet: m.replace(/\s+/g, ' ').slice(0, 200)
-        });
-      }
-    }
-
     for (const pat of EVENT_PATTERNS) {
       const match = m.match(pat.re);
       if (!match) continue;
@@ -110,13 +86,6 @@ const parseAssistantEvents = (snapshot) => {
       const key = `${pat.type}:${ship.name}:${msgTs || m.slice(0, 40)}`;
       if (state.seenEventKeys.has(key)) continue;
       state.seenEventKeys.add(key);
-
-      // A task ending frees a slot — lift the cap flag.
-      if (pat.clearsCap && state.corpTasksCapped) {
-        state.corpTasksCapped = false;
-        state.corpTasksCappedAt = null;
-      }
-
       events.push({
         type: pat.type,
         ship: ship.name,
@@ -184,6 +153,12 @@ const decide = (snapshot) => {
   const out = [];
   const cooldownMs = cfg.decisionCooldownSec * 1000;
 
+  // Count corp ships that already have an autonomous task running. The game
+  // caps concurrent corp-ship tasks (default 3). Once at cap we stop dispatching
+  // new trade/explore orders, but still run refuel / bank / upgrade directives.
+  const corpActive = ships.filter((s) => !s.primary && s.active === true).length;
+  const capReached = corpActive >= cfg.corpTaskCap;
+
   for (const s of ships) {
     // Refuel guard: warp below floor → one refuel prompt per ship, with longer cooldown.
     if (cfg.enabled.refuel && s.warpPower != null && s.warpPower < cfg.minWarp) {
@@ -201,11 +176,7 @@ const decide = (snapshot) => {
     if (s.primary) continue; // Kestrel idleness isn't reliably inferable from DOM — user drives it
 
     if (s.active === true) continue; // corp ship already on a task
-
-    // Respect the 3-task corp cap: if we hit it, skip new trade/explore dispatches
-    // entirely. Refuel / bank / upgrade still run since they're short directives,
-    // not autonomous task starts.
-    if (state.corpTasksCapped) continue;
+    if (capReached) continue;         // all corp task slots occupied — wait for one to end
 
     // Corp ship idle → dispatch based on kind.
     const kind = shipKind(s.name);
@@ -295,6 +266,8 @@ const runTick = async () => {
 
     const decisions = decide(snapshot);
 
+    const corpActiveCount = (snapshot?.extracted?.ships || []).filter((s) => !s.primary && s.active === true).length;
+    const cappedNow = corpActiveCount >= state.config.corpTaskCap;
     appendLog({
       type: 'tick',
       snapshot: snapshot?.extracted ? {
@@ -305,10 +278,12 @@ const runTick = async () => {
         creditsOnHand: snapshot.extracted.creditsOnHand,
         anyTaskWorking: snapshot.extracted.anyTaskWorking,
         tasksRunning: (snapshot.extracted.tasks || []).filter((t) => t.working).length,
-        capped: state.corpTasksCapped
+        corpActive: corpActiveCount,
+        corpTaskCap: state.config.corpTaskCap,
+        capped: cappedNow
       } : null,
       decisionCount: decisions.length,
-      capped: state.corpTasksCapped
+      capped: cappedNow
     });
 
     for (const d of decisions) {
@@ -336,8 +311,6 @@ export const startAutopilot = (config = {}) => {
   state.startedAt = Date.now();
   state.lastDecisionAt.clear();
   state.seenEventKeys.clear();
-  state.corpTasksCapped = false;
-  state.corpTasksCappedAt = null;
   state.log.length = 0;
   appendLog({ type: 'start', config: state.config });
   runTick();
@@ -357,8 +330,6 @@ export const getAutopilotState = () => ({
   running: state.running,
   config: state.config,
   startedAt: state.startedAt,
-  corpTasksCapped: state.corpTasksCapped,
-  corpTasksCappedAt: state.corpTasksCappedAt,
   lastSnapshot: state.lastSnapshot?.extracted || null,
   log: state.log.slice(-200),
   lastDecisions: Object.fromEntries(state.lastDecisionAt)

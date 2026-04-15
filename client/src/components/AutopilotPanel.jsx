@@ -10,6 +10,7 @@ const DEFAULT_CONFIG = {
   exploreMaxHops: 40,
   considerUpgrades: true,
   upgradeCreditsThreshold: 100000,
+  corpTaskCap: 3,
   enabled: { refuel: true, explore: true, trade: true, bank: true, upgrade: true }
 };
 
@@ -28,7 +29,7 @@ const formatEntry = (e) => {
     if (!s) return 'poll (no snapshot)';
     const running = s.tasksRunning ?? 0;
     const ships = (s.ships || []).map((sh) => `${sh.name.split(' ').pop()}:${sh.warp ?? '-'}${sh.active ? '●' : '○'}`).join(' ');
-    const cap = e.capped ? ' CAPPED' : '';
+    const cap = e.capped ? ` corpTasks=${s.corpActive}/${s.corpTaskCap} CAPPED` : (s.corpActive != null ? ` corp=${s.corpActive}/${s.corpTaskCap}` : '');
     return `poll  tasks=${running}${cap}  bank=${s.creditsBank}  hand=${s.creditsOnHand}  [${ships}]  decisions=${e.decisionCount}`;
   }
   if (e.type === 'decision') return (e.ship ? `[${e.ship.split(' ').pop()}] ` : '') + e.text;
@@ -159,6 +160,12 @@ export const AutopilotPanel = () => {
               <input type="number" min={0} value={config.upgradeCreditsThreshold}
                 onChange={(e) => setConfig({ ...config, upgradeCreditsThreshold: Number(e.target.value) })}
                 className="bg-slate-950 border border-slate-800 rounded px-1 py-0.5 w-20" />
+            </label>
+            <label className="flex items-center gap-1">
+              <span className="text-slate-400 w-24">Corp task cap</span>
+              <input type="number" min={1} max={10} value={config.corpTaskCap}
+                onChange={(e) => setConfig({ ...config, corpTaskCap: Number(e.target.value) })}
+                className="bg-slate-950 border border-slate-800 rounded px-1 py-0.5 w-16" />
             </label>
           </div>
           <div className="flex flex-wrap gap-x-3 gap-y-1 pt-1">
