@@ -1,0 +1,20 @@
+{
+  "name": "gradient-play",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Automation companion for Gradient Bang — compose missions, drive the in-game AI assistant via CDP, monitor live state",
+  "type": "module",
+  "scripts": {
+    "dev": "concurrently -n server,client -c green,cyan \"npm --prefix server run dev\" \"npm --prefix client run dev\"",
+    "build": "npm --prefix client run build",
+    "start": "node --watch server/index.js",
+    "install:all": "npm install && npm --prefix server install && npm --prefix client install",
+    "pm2:start": "pm2 start ecosystem.config.cjs",
+    "pm2:stop": "pm2 stop ecosystem.config.cjs",
+    "pm2:restart": "pm2 restart ecosystem.config.cjs",
+    "pm2:logs": "pm2 logs"
+  },
+  "devDependencies": {
+    "concurrently": "9.1.0"
+  }
+}

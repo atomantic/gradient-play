@@ -1,0 +1,15 @@
+{
+  "name": "gradient-play-server",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "main": "index.js",
+  "scripts": {
+    "dev": "node --watch index.js",
+    "start": "node index.js"
+  },
+  "dependencies": {
+    "express": "5.2.1",
+    "playwright-core": "1.48.2"
+  }
+}
