@@ -2,6 +2,8 @@
 
 Automation companion for [Gradient Bang](https://game.gradient-bang.com). Compose goal-directed missions, target individual ships in your fleet, and drive the in-game AI assistant through a CDP-connected Chrome browser. Live DOM snapshots feed state-gated abort/stop conditions; a low-frequency idle-nudge keeps long autonomous tasks alive past the game's 5-minute timeout without spamming prompts.
 
+![Dashboard](./dashboard.png)
+
 Strategy playbook that informs the prompt templates: [strategy.md](./strategy.md).
 
 ## Corp
