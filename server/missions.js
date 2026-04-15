@@ -22,13 +22,14 @@ const evaluateCondition = (cond, snapshot) => {
 const shipPhrase = (spec) =>
   spec.targetShip ? `the ${spec.targetShip}` : 'the fleet';
 
-// Appends routing guidance for a recall-to-megaport command: name the
-// known-hostile sectors from intel so the agent plots around them.
+// Routing guidance for a recall-to-megaport command. Priority is:
+// (1) don't get stranded, (2) prefer safe route, (3) accept closest if safe
+// isn't reachable on current warp.
 const safeRoutingClause = () => {
   const bad = dangerousSectors();
-  if (!bad.length) return 'Pick a safe megaport.';
+  if (!bad.length) return 'Prefer a safe megaport; if warp is too low to reach one safely, just go to the closest megaport — do not risk getting stranded.';
   const list = bad.slice(0, 8).join(', ');
-  return `Avoid sectors ${list} — we've had ships destroyed there. Pick a safe megaport and plot around those sectors if needed.`;
+  return `Prefer a safe megaport and plot around sectors ${list} (we've had ships destroyed there). But getting stranded is worse than running a risky sector, so if warp is too low to reach a safe port, head to the closest megaport — any megaport beats being stuck in empty space.`;
 };
 
 const buildKickoffPrompt = (spec) => {

@@ -4,7 +4,7 @@ import { observe as intelObserve, dangerousSectors } from './intel.js';
 const safeRoutingClause = () => {
   const bad = dangerousSectors();
   if (!bad.length) return '';
-  return ` Steer clear of sectors ${bad.slice(0, 8).join(', ')} — we've lost ships there.`;
+  return ` Prefer a safe route around sectors ${bad.slice(0, 8).join(', ')} (lost ships there), but if warp's too low to reach a safe port, go to the closest megaport — stranded is worse than risky.`;
 };
 
 const DEFAULTS = {
