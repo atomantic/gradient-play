@@ -25,8 +25,76 @@ const state = {
   timer: null,
   log: [],
   lastDecisionAt: new Map(),
+  seenEventKeys: new Set(),
   lastSnapshot: null,
   subscribers: new Set()
+};
+
+/**
+ * Patterns of assistant chat messages that tell us an autonomous task has
+ * ended or state has changed materially. Each matches a "role" word
+ * (hauler/probe/kestrel/courier) that we map to a concrete ship name.
+ */
+const EVENT_PATTERNS = [
+  {
+    type: 'task-max-steps',
+    re: /the (\w+)(?:['\u2019]s)?\s*(?:current\s+)?(?:autonomous\s+)?task\s+(?:has\s+)?ended\s+after\s+reaching\s+its\s+maximum\s+allowed\s+steps/i,
+    clearsCooldownFor: ['trade', 'explore']
+  },
+  {
+    type: 'task-aborted',
+    re: /(?:the\s+)?(\w+)(?:['\u2019]s)?\s+(?:autonomous\s+)?task\s+(?:has\s+been\s+|was\s+)?aborted/i,
+    clearsCooldownFor: ['trade', 'explore']
+  },
+  {
+    type: 'task-completed',
+    re: /(?:the\s+)?(\w+)(?:['\u2019]s)?\s+(?:autonomous\s+)?task\s+(?:has\s+)?completed/i,
+    clearsCooldownFor: ['trade', 'explore']
+  }
+];
+
+const matchShipByRole = (roleWord = '', ships = []) => {
+  const w = roleWord.toLowerCase();
+  // Specific names first — if the assistant said "SA-ME" try to match it literally.
+  const direct = ships.find((s) => s.name.toLowerCase().includes(w));
+  if (direct) return direct;
+  if (/probe/.test(w)) return ships.find((s) => /PROBE/i.test(s.name));
+  if (/hauler|freighter|lifter|atlas|pioneer|wayfarer/.test(w)) {
+    return ships.find((s) => /HAULER|FREIGHTER|LIFTER|ATLAS|PIONEER|WAYFARER/i.test(s.name));
+  }
+  if (/kestrel|courier|ship/.test(w)) return ships.find((s) => s.primary);
+  return null;
+};
+
+const parseAssistantEvents = (snapshot) => {
+  const msgs = snapshot?.extracted?.lastMessages || [];
+  const ships = snapshot?.extracted?.ships || [];
+  const events = [];
+  for (const m of msgs) {
+    if (!m) continue;
+    const tsMatch = m.match(/\[(\d{2}:\d{2}:\d{2})\]/);
+    const msgTs = tsMatch ? tsMatch[1] : null;
+    // Only parse assistant prose (FUNCTION CALL / USER lines are noise here).
+    if (!/ASSISTANT[:\s]/i.test(m)) continue;
+    for (const pat of EVENT_PATTERNS) {
+      const match = m.match(pat.re);
+      if (!match) continue;
+      const ship = matchShipByRole(match[1], ships);
+      if (!ship) continue;
+      const key = `${pat.type}:${ship.name}:${msgTs || m.slice(0, 40)}`;
+      if (state.seenEventKeys.has(key)) continue;
+      state.seenEventKeys.add(key);
+      events.push({
+        type: pat.type,
+        ship: ship.name,
+        roleWord: match[1],
+        msgTs,
+        snippet: m.replace(/\s+/g, ' ').slice(0, 200),
+        clearsCooldownFor: pat.clearsCooldownFor
+      });
+    }
+  }
+  return events;
 };
 
 const appendLog = (entry) => {
@@ -169,6 +237,18 @@ const runTick = async () => {
   try {
     const snapshot = await getGameSnapshot();
     state.lastSnapshot = snapshot;
+
+    // Chat-event scan: if the assistant reported "task ended after max steps"
+    // (or similar) for a specific ship, clear that ship's cooldown keys so
+    // decide() re-dispatches on this same tick.
+    const events = parseAssistantEvents(snapshot);
+    for (const ev of events) {
+      appendLog({ type: 'event', ...ev });
+      for (const prefix of ev.clearsCooldownFor || []) {
+        state.lastDecisionAt.delete(`${prefix}:${ev.ship}`);
+      }
+    }
+
     const decisions = decide(snapshot);
 
     appendLog({
@@ -209,6 +289,7 @@ export const startAutopilot = (config = {}) => {
   state.running = true;
   state.startedAt = Date.now();
   state.lastDecisionAt.clear();
+  state.seenEventKeys.clear();
   state.log.length = 0;
   appendLog({ type: 'start', config: state.config });
   runTick();

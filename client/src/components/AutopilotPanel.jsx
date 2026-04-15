@@ -15,6 +15,7 @@ const DEFAULT_CONFIG = {
 
 const entryColor = (type) => ({
   decision: 'text-cyan-300',
+  event: 'text-amber-300',
   tick: 'text-slate-500',
   start: 'text-emerald-400',
   stop: 'text-amber-400',
@@ -30,6 +31,7 @@ const formatEntry = (e) => {
     return `poll  tasks=${running}  bank=${s.creditsBank}  hand=${s.creditsOnHand}  [${ships}]  decisions=${e.decisionCount}`;
   }
   if (e.type === 'decision') return (e.ship ? `[${e.ship.split(' ').pop()}] ` : '') + e.text;
+  if (e.type === 'event') return `[${e.ship?.split(' ').pop() || '?'}] ${e.type === 'event' ? e.snippet : ''} — cooldown cleared`;
   if (e.type === 'error') return 'error: ' + e.error;
   if (e.type === 'start') return 'autopilot started';
   if (e.type === 'stop') return 'autopilot stopped';

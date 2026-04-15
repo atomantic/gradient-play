@@ -226,8 +226,8 @@ export const getGameSnapshot = async () => {
     const lastMessages = [];
     if (chatScroll) {
       const children = chatScroll.querySelectorAll(':scope > div, :scope > * > div');
-      const arr = Array.from(children).slice(-5);
-      for (const c of arr) lastMessages.push(c.innerText?.slice(0, 400));
+      const arr = Array.from(children).slice(-20);
+      for (const c of arr) lastMessages.push(c.innerText?.slice(0, 500));
     }
     extracted.lastMessages = lastMessages;
 
