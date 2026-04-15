@@ -52,6 +52,21 @@ const builtins = [
     }
   },
   {
+    name: 'Kestrel: federation trade loop',
+    spec: {
+      goal: 'Run a short, profitable NS trade loop entirely within federation space. Do not cross into border or neutral sectors — our Kestrel lacks the shields (150) and fighters (300) to survive combat, and we do not have a Corsair-tier replacement yet. Prioritize Neuro-Symbolics routes (best margin per cargo slot). Refuel at a megaport whenever warp gets low. If any port run takes us outside fedspace, abort the loop and find a new one.',
+      guardrails: [
+        'STRICTLY federation space only — no border or neutral sectors',
+        'Prioritize Neuro-Symbolics routes for margin',
+        'Flee immediately if attacked; do not engage',
+        'Refuel before warp drops below 100'
+      ],
+      intervalSec: 30,
+      nudgeAfterIdleSec: 270,
+      abortWhen: [{ metric: 'warpPower', op: '<', value: 80 }]
+    }
+  },
+  {
     name: 'Probe: autonomous exploration',
     spec: {
       goal: 'Start an autonomous exploration task on this ship: visit every sector within 40 hops that I have not yet mapped.',
@@ -81,8 +96,13 @@ const builtins = [
   {
     name: 'Light Hauler: short trade loop',
     spec: {
-      goal: 'Start an autonomous trade task on this Light Hauler: identify a 2–3 hop profitable loop near its current sector and run it continuously. Steer the task if port depletion reduces margins below 20 cr/unit.',
-      guardrails: ['Refuel at a megaport when warp drops below 100'],
+      goal: 'Start an autonomous trade task on this Light Hauler: identify a 2–3 hop profitable NS loop in federation space or sectors directly adjacent to it, and run it continuously. Steer the task if port depletion reduces margins below 20 cr/unit. Do not route through deep neutral space — we lack a Corsair-tier defender, so a destroyed hauler is real loss.',
+      guardrails: [
+        'Stick to federation space or directly adjacent neutral sectors',
+        'Prioritize Neuro-Symbolics routes (best margin)',
+        'Refuel at a megaport when warp drops below 100',
+        'Flee any combat — haulers have 10 fighters and 0 shields'
+      ],
       intervalSec: 30,
       nudgeAfterIdleSec: 270,
       abortWhen: []

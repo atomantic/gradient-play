@@ -159,14 +159,9 @@ const decide = (snapshot) => {
   const out = [];
   const cooldownMs = cfg.decisionCooldownSec * 1000;
 
-  // Count corp ships that already have an autonomous task running. The game
-  // caps concurrent corp-ship tasks (default 3). Once at cap we stop dispatching
-  // new trade/explore orders, but still run refuel / bank / upgrade directives.
-  const corpActive = ships.filter((s) => !s.primary && s.active === true).length;
-  const capReached = corpActive >= cfg.corpTaskCap;
-
+  // Refuel guard runs first for every ship (including active ones — a break-off
+  // order to recharge supersedes any running task).
   for (const s of ships) {
-    // Refuel guard: warp below floor → one refuel prompt per ship, with longer cooldown.
     if (cfg.enabled.refuel && s.warpPower != null && s.warpPower < cfg.minWarp) {
       const key = `refuel:${s.name}`;
       if (canAct(key, cooldownMs)) {
@@ -176,35 +171,56 @@ const decide = (snapshot) => {
           text: `Heads up — the ${s.name} is down to ${s.warpPower} warp. Pull it off whatever it's doing, route to a safe megaport, and recharge before it gets stranded.${safeRoutingClause()}`
         });
       }
-      continue; // don't stack a trade order on a low-fuel ship this tick
     }
+  }
 
-    if (s.primary) continue; // Kestrel idleness isn't reliably inferable from DOM — user drives it
+  // Role-balanced allocation for idle corp ships.
+  // Strategy (per strategy.md):
+  //   - Game enforces 3 concurrent corp-ship tasks.
+  //   - Reserve 1 slot for a probe on explore/salvage (high map value).
+  //   - Fill the remaining slots with haulers on short trade loops in/near fedspace.
+  //   - Kestrel (primary) is hands-off; until we have a Corsair-tier hull we don't
+  //     auto-dispatch it. User drives it or launches a manual mission.
+  const corpShips = ships.filter((s) => !s.primary);
+  const activeCorp = corpShips.filter((s) => s.active === true);
+  const idleCorp = corpShips.filter((s) => s.active === false && s.warpPower != null && s.warpPower >= cfg.minWarp);
 
-    if (s.active === true) continue; // corp ship already on a task
-    if (capReached) continue;         // all corp task slots occupied — wait for one to end
+  const activeProbeCount = activeCorp.filter((s) => shipKind(s.name) === 'probe').length;
+  const idleProbes = idleCorp.filter((s) => shipKind(s.name) === 'probe');
+  const idleHaulers = idleCorp.filter((s) => ['hauler', 'trader-light'].includes(shipKind(s.name)));
 
-    // Corp ship idle → dispatch based on kind.
-    const kind = shipKind(s.name);
-    if (kind === 'probe' && cfg.enabled.explore) {
-      const key = `explore:${s.name}`;
-      if (canAct(key, cooldownMs)) {
-        out.push({
-          key,
-          ship: s.name,
-          text: `The ${s.name} is idle — put it on explore-and-salvage duty: map unvisited sectors within ${cfg.exploreMaxHops} hops, and on every sector arrival check for salvage and claim it (900s TTL). Deposit any credits at the next megaport. Flee any combat; refuel as needed.`
-        });
-      }
-    } else if ((kind === 'hauler' || kind === 'trader-light') && cfg.enabled.trade) {
-      const key = `trade:${s.name}`;
-      if (canAct(key, cooldownMs)) {
-        out.push({
-          key,
-          ship: s.name,
-          text: `The ${s.name} is idle — start an autonomous trade task on it. Find a profitable 2–3 hop NS loop near its current sector and run it. Refuel at a megaport if warp dips low.`
-        });
-      }
+  // Sort idle haulers by warp desc so we prefer the ones with runway.
+  idleHaulers.sort((a, b) => (b.warpPower || 0) - (a.warpPower || 0));
+  idleProbes.sort((a, b) => (b.warpPower || 0) - (a.warpPower || 0));
+
+  let remainingSlots = Math.max(0, cfg.corpTaskCap - activeCorp.length);
+
+  // Reserve slot 1 for a probe (if no probe is already running and we have one idle).
+  if (remainingSlots > 0 && cfg.enabled.explore && activeProbeCount === 0 && idleProbes.length > 0) {
+    const probe = idleProbes[0];
+    const key = `explore:${probe.name}`;
+    if (canAct(key, cooldownMs)) {
+      out.push({
+        key,
+        ship: probe.name,
+        text: `The ${probe.name} is idle — put it on explore-and-salvage duty: map unvisited sectors within ${cfg.exploreMaxHops} hops, and on every sector arrival check for salvage and claim it (900s TTL). Deposit any credits at the next megaport. Flee any combat; refuel as needed. Probes are disposable scouts — venture into deep space, but don't linger in known-hostile sectors.`
+      });
+      remainingSlots -= 1;
     }
+  }
+
+  // Fill remaining slots with haulers on safe trade loops.
+  for (const hauler of idleHaulers) {
+    if (remainingSlots <= 0) break;
+    if (!cfg.enabled.trade) break;
+    const key = `trade:${hauler.name}`;
+    if (!canAct(key, cooldownMs)) continue;
+    out.push({
+      key,
+      ship: hauler.name,
+      text: `The ${hauler.name} is idle — start an autonomous trade task. Stick to federation space or adjacent neutral sectors; do NOT venture deep into contested territory. We don't have a Corsair-tier defender yet, so a lost hauler is real loss. Find a profitable 2–3 hop NS commodity loop near its current sector and run it. Refuel at a megaport if warp dips low.${safeRoutingClause()}`
+    });
+    remainingSlots -= 1;
   }
 
   // Bank reserve: if bank is under target and we have enough on-hand to spare, deposit.
