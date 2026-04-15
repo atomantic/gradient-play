@@ -54,10 +54,10 @@ const builtins = [
   {
     name: 'Kestrel: federation trade loop',
     spec: {
-      goal: 'Run a short, profitable NS trade loop entirely within federation space. Do not cross into border or neutral sectors — we lack a Corsair-tier replacement and any ship loss sets us back. Fedspace is PvP-safe, so just focus on finding the best NS margin. Prioritize Neuro-Symbolics routes (best margin per cargo slot). Refuel at a megaport whenever warp gets low. If any candidate route takes us outside fedspace, skip it and find another.',
+      goal: 'Run a short NS trade loop entirely within federation space. No border or neutral sectors. Refuel at a megaport when warp gets low.',
       guardrails: [
-        'STRICTLY federation space only — no border or neutral sectors',
-        'Prioritize Neuro-Symbolics routes for margin',
+        'Federation space only',
+        'Prioritize NS routes',
         'Refuel before warp drops below 100'
       ],
       intervalSec: 30,
@@ -78,14 +78,14 @@ const builtins = [
   {
     name: 'Probe: explore & salvage',
     spec: {
-      goal: 'Primary mission: map new space. Move to unmapped sectors to widen our corp map. Secondary mission: opportunistic salvage. On arrival in any sector, check for salvage — if you find some, claim it immediately with salvage_collect (900s TTL) and deposit credits at the next megaport. Unless I have listed specific known salvage sectors in your guardrails, always default to unmapped sectors — combat is random, so coverage maximizes our hit rate. Flee any combat (0 shields, 10 fighters). Refuel as needed.',
+      goal: 'Explore unmapped sectors, and on every sector arrival check for salvage and claim it. Deposit credits at each megaport visit. Unless I list known salvage sectors in your guardrails, default to unmapped sectors.',
       guardrails: [
-        'Primary: visit unmapped sectors — exploration is how we find salvage',
-        'On every sector arrival: check for salvage and claim it',
-        'Deposit all credits at every megaport visit',
-        'Refuel before warp power drops below 80',
-        'Flee every combat encounter — no exceptions',
-        'Do not engage garrisons or toll gates'
+        'Visit unmapped sectors by default',
+        'Check for salvage on every sector arrival',
+        'Deposit credits at each megaport visit',
+        'Refuel before warp drops below 80',
+        'Flee any combat',
+        'No garrisons or toll gates'
       ],
       intervalSec: 30,
       nudgeAfterIdleSec: 270,
@@ -95,12 +95,12 @@ const builtins = [
   {
     name: 'Light Hauler: short trade loop',
     spec: {
-      goal: 'Start an autonomous trade task on this Light Hauler: identify a 2–3 hop profitable NS loop in federation space or sectors directly adjacent to it, and run it continuously. Steer the task if port depletion reduces margins below 20 cr/unit. Do not route through deep neutral space — we lack a Corsair-tier defender, so a destroyed hauler is real loss.',
+      goal: 'Start an autonomous trade task on this hauler. Find a 2-3 hop NS loop in federation space or sectors directly adjacent to it, and run it. Steer if port depletion drops margin below 20 cr/unit.',
       guardrails: [
-        'Stick to federation space or directly adjacent neutral sectors',
-        'Prioritize Neuro-Symbolics routes (best margin)',
-        'Refuel at a megaport when warp drops below 100',
-        'Flee any combat — haulers have 10 fighters and 0 shields'
+        'Federation space or directly adjacent only',
+        'Prioritize NS routes',
+        'Refuel before warp drops below 100',
+        'Flee any combat'
       ],
       intervalSec: 30,
       nudgeAfterIdleSec: 270,

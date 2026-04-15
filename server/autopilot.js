@@ -8,46 +8,46 @@ const safeRoutingClause = () => {
   if (!bad.length) return '';
   const list = bad.slice(0, 8).join(', ');
   return pick([
-    ` try to avoid sectors ${list} (we lost ships there), but if warp is too low just go to the closest megaport, getting stranded is worse.`,
-    ` route around ${list} if you can, we lost ships in those sectors. but dont get stranded, any megaport is better than empty space.`,
-    ` steer clear of ${list} if possible (bad history there), otherwise closest megaport wins.`
+    ` avoid sectors ${list} if you can, closest megaport is fine if warp is tight.`,
+    ` route around ${list} if possible.`,
+    ` steer clear of ${list} if warp allows.`
   ]);
 };
 
 const refuelPrompt = (ship, warp) => pick([
-  `hey, ${ship} is down to ${warp} warp. pull it off whatever its doing and send it to a safe megaport to recharge.` + safeRoutingClause(),
-  `${ship} fuel is low, ${warp} warp left. break off its task and route to a megaport to top off.` + safeRoutingClause(),
-  `fuel check on ${ship}, ${warp} warp. recall to a megaport and recharge before it strands.` + safeRoutingClause()
+  `${ship} is down to ${warp} warp. pull it off its task and send it to a megaport to recharge.` + safeRoutingClause(),
+  `${ship} fuel is low, ${warp} warp left. break off and route to a megaport to top off.` + safeRoutingClause(),
+  `fuel check on ${ship}, ${warp} warp. recall to a megaport and recharge.` + safeRoutingClause()
 ]);
 
 const probeExplorePrompt = (probe, hops) => pick([
-  `${probe} is idle, send it out on explore and salvage. map unvisited sectors within ${hops} hops, check every sector for salvage on arrival (900s ttl), deposit credits at megaports. flee any combat. probes are disposable, deep space is fine, just dont linger in hostile sectors.`,
-  `put ${probe} back to work. explore and salvage duty, ${hops} hop radius of unmapped space. claim any salvage you find, bank credits whenever you dock. flee fights. probes are cheap so deep space is ok.`,
-  `${probe} needs a job. scout unmapped space out to ${hops} hops, grab salvage where you find it, drop credits at megaports. dont stick around in known hostile sectors.`
+  `${probe} is idle, put it on explore and salvage. map unvisited sectors within ${hops} hops, check each new sector for salvage, deposit credits at megaports, flee combat. avoid known hostile sectors.`,
+  `put ${probe} back to work. explore and salvage, ${hops} hop radius of unmapped space. claim salvage on arrival, bank credits when docked.`,
+  `${probe} needs a job. scout unmapped space out to ${hops} hops, grab salvage where you find it, drop credits at megaports.`
 ]);
 
 const haulerTradePrompt = (hauler) => pick([
-  `${hauler} is idle, start a trade task. stick to fedspace or sectors right next to it, no deep neutral space. we cant replace a lost hauler right now. find a 2-3 hop NS loop and run it. refuel at megaports when warp gets low.` + safeRoutingClause(),
-  `put ${hauler} on a short NS trade loop, fedspace or adjacent only. no contested territory without a corsair to back us up. refuel as needed.` + safeRoutingClause(),
-  `${hauler} needs a run. 2-3 hop NS loop somewhere near fedspace, stay safe, refuel when warp dips.` + safeRoutingClause()
+  `${hauler} is idle, start a trade task. fedspace or adjacent neutral only. find a 2-3 hop NS loop and run it. refuel as needed.` + safeRoutingClause(),
+  `put ${hauler} on a short NS trade loop, fedspace or adjacent only. refuel at megaports when warp dips.` + safeRoutingClause(),
+  `${hauler} needs a run. 2-3 hop NS loop near fedspace, refuel when low.` + safeRoutingClause()
 ]);
 
 const bankSweepPrompt = (excess, onHand, floor) => pick([
-  `next time you dock at a megaport, deposit ${excess} credits in the bank. we have ${onHand} on hand but only need about ${floor} for working capital. anything extra on the ship is just destruction risk.`,
-  `bank sweep time. sitting on ${onHand} on hand, ${excess} above our ${floor} working floor. drop the excess in the bank on the next megaport stop.`,
-  `lets bank the extra. ${excess} over what we need is just at risk. deposit on your next dock.`
+  `next megaport stop, deposit ${excess} credits. leave about ${floor} on hand for working capital.`,
+  `bank sweep: deposit ${excess} at the next dock. keeping ${floor} on hand.`,
+  `deposit ${excess} credits on the next megaport visit, holding ${floor} for trades.`
 ]);
 
 const upgradePrompt = (shipName, total, next) => pick([
-  `we have ${total} credits, enough for a ${next.name} at ${next.price}. when the ${shipName} next docks, trade it in and pick up the ${next.name}, then get back to trading.`,
-  `upgrade ready. ${total} credits means we can afford the ${next.name} (${next.price}). swap the ${shipName} for it at the next megaport.`,
-  `time to trade up. ${total} on hand + banked, and the ${next.name} is ${next.price}. next megaport, swap ${shipName} for the new hull and resume.`
+  `we have ${total} credits, enough for a ${next.name} (${next.price}). next megaport, trade in the ${shipName} and buy the ${next.name}, then resume trading.`,
+  `${total} credits available. swap the ${shipName} for a ${next.name} (${next.price}) at the next megaport.`,
+  `trade up: ${shipName} in, ${next.name} out, next dock. ${next.price} out of ${total} on hand and banked.`
 ]);
 
 const primaryTradePrompt = (primary) => pick([
-  `start a short NS trade loop for the ${primary}, fedspace only. 2-3 hops, refuel when warp gets low. fedspace is pvp safe so just go for margin.`,
-  `put the ${primary} on a trade loop in fedspace. stick to federation sectors, pick the best NS margin you can find, refuel as needed.`,
-  `${primary} trade loop please, federation space only. short NS hops. no border or neutral zones.`
+  `start a short NS trade loop for the ${primary}, fedspace only. 2-3 hops, refuel when warp gets low.`,
+  `put the ${primary} on a fedspace NS trade loop. refuel as needed.`,
+  `${primary} on an NS trade loop, federation space only. 2-3 hops.`
 ]);
 
 const DEFAULTS = {

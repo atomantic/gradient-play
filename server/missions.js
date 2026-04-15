@@ -27,15 +27,15 @@ const shipPhrase = (spec) =>
 const safeRoutingClause = () => {
   const bad = dangerousSectors();
   if (!bad.length) return pick([
-    'pick a safe megaport. if warp is too low to reach one, just go to the closest, dont risk stranding.',
-    'head for a safe megaport. if warp is tight, closest wins over getting stranded.',
-    'safe megaport preferred, but closest if warp is too low.'
+    'pick a safe megaport, closest if warp is tight.',
+    'head for a safe megaport, closest works if warp is low.',
+    'safe megaport preferred, closest otherwise.'
   ]);
   const list = bad.slice(0, 8).join(', ');
   return pick([
-    `try to route around ${list} (we lost ships there), but if warp is too low to reach a safe port just go to the closest megaport, stranding is worse.`,
-    `avoid sectors ${list} if you can (bad history), otherwise closest megaport is fine.`,
-    `prefer a safe port and steer clear of ${list}, but dont get stranded, any megaport beats empty space.`
+    `route around ${list} if you can, closest megaport is fine if warp is tight.`,
+    `avoid sectors ${list} if possible.`,
+    `steer clear of ${list} if warp allows.`
   ]);
 };
 
