@@ -45,6 +45,28 @@ const shipKind = (name = '') => {
   return 'unknown';
 };
 
+// Next upgrade tier by current ship class, from strategy.md.
+// price = next tier cost (before trade-in; we use it as a target only).
+const NEXT_UPGRADE = {
+  SPARROW: { name: 'Kestrel Courier', price: 25000 },
+  KESTREL: { name: 'Wayfarer Freighter', price: 120000 },
+  WAYFARER: { name: 'Pioneer Lifter', price: 220000 },
+  PIONEER: { name: 'Atlas Hauler', price: 260000 },
+  ATLAS: { name: 'Sovereign Starcruiser', price: 2500000 },
+  CORSAIR: { name: 'Pike Frigate', price: 300000 },
+  PIKE: { name: 'Bulwark Destroyer', price: 450000 },
+  BULWARK: { name: 'Aegis Cruiser', price: 700000 },
+  AEGIS: { name: 'Sovereign Starcruiser', price: 2500000 }
+};
+
+const findNextUpgrade = (shipName = '') => {
+  const n = shipName.toUpperCase();
+  for (const key of Object.keys(NEXT_UPGRADE)) {
+    if (n.includes(key)) return NEXT_UPGRADE[key];
+  }
+  return null;
+};
+
 const canAct = (key, cooldownMs) => {
   const prev = state.lastDecisionAt.get(key) || 0;
   return Date.now() - prev >= cooldownMs;
@@ -87,7 +109,7 @@ const decide = (snapshot) => {
         out.push({
           key,
           ship: s.name,
-          text: `The ${s.name} is sitting idle. Kick off an exploration task on it: visit every unvisited sector within ${cfg.exploreMaxHops} hops of its current position, and report progress as it goes.`
+          text: `The ${s.name} is idle — put it on an exploration task: visit every unvisited sector within ${cfg.exploreMaxHops} hops of its current position.`
         });
       }
     } else if ((kind === 'hauler' || kind === 'trader-light') && cfg.enabled.trade) {
@@ -96,7 +118,7 @@ const decide = (snapshot) => {
         out.push({
           key,
           ship: s.name,
-          text: `The ${s.name} is idle. Start an autonomous trade task on it — find a profitable 2–3 hop NS loop near its current sector and run it continuously. Refuel at a megaport if warp drops below 100.`
+          text: `The ${s.name} is idle — start an autonomous trade task on it. Find a profitable 2–3 hop NS loop near its current sector and run it. Refuel at a megaport if warp dips low.`
         });
       }
     }
@@ -114,21 +136,26 @@ const decide = (snapshot) => {
       if (canAct(key, cooldownMs)) {
         out.push({
           key,
-          text: `When you next dock at a megaport, deposit ${amount} credits into the bank — we want to keep at least ${cfg.bankReserveMin} in reserve as insurance against getting destroyed.`
+          text: `Next time you're at a megaport, drop ${amount} credits in the bank — we want at least ${cfg.bankReserveMin} tucked away in case anything gets destroyed.`
         });
       }
     }
   }
 
-  // Upgrade reminder: if we're sitting on enough credits, nudge a check.
-  if (cfg.enabled.upgrade && cfg.considerUpgrades) {
-    const total = (ex.creditsBank ?? 0) + (ex.creditsOnHand ?? 0);
-    if (total >= cfg.upgradeCreditsThreshold) {
-      const key = 'upgrade:check';
+  // Upgrade: only fire when (a) we know the primary ship's next tier and (b) we can
+  // actually afford it while keeping the bank reserve. Ship ladder lives in code
+  // (from strategy.md) so we don't ask the agent to look anything up.
+  if (cfg.enabled.upgrade && cfg.considerUpgrades && ex.shipName) {
+    const next = findNextUpgrade(ex.shipName);
+    const bank = ex.creditsBank ?? 0;
+    const onHand = ex.creditsOnHand ?? 0;
+    const total = bank + onHand;
+    if (next && total >= next.price && bank >= cfg.bankReserveMin) {
+      const key = `upgrade:${next.name}`;
       if (canAct(key, cooldownMs * 2)) {
         out.push({
           key,
-          text: `We're sitting on ${total} total credits. Check if the ${ex.shipName || 'current ship'} has a worthwhile upgrade available — if we can afford the next tier and keep at least ${cfg.bankReserveMin} in the bank as reserve, head to a megaport, trade in, and purchase it.`
+          text: `We've got ${total} credits — enough to trade up to a ${next.name} (${next.price}). When the ${ex.shipName} next hits a megaport, trade it in and buy the ${next.name}, then get back to trading in the new hull.`
         });
       }
     }

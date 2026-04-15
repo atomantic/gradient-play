@@ -36,7 +36,9 @@ const buildKickoffPrompt = (spec) => {
 
 const buildNudgePrompt = (spec) => {
   const who = shipPhrase(spec);
-  return `How's ${who} doing? If that task stalled out or timed out, go ahead and spin it back up — same goal as before.`;
+  // We only send this when DOM tells us the task died (engine idle + no stat deltas).
+  // So don't ask for status — just re-kick.
+  return `Looks like ${who}'s task dropped out. Pick it back up — ${spec.goal}`;
 };
 
 const reasonPhrase = (reason, snapshot) => {

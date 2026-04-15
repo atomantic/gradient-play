@@ -55,7 +55,7 @@ const builtins = [
   {
     name: 'Probe: autonomous exploration',
     spec: {
-      goal: 'Start an autonomous exploration task on this ship: visit every sector within 40 hops that I have not yet mapped. Report progress each tick.',
+      goal: 'Start an autonomous exploration task on this ship: visit every sector within 40 hops that I have not yet mapped.',
       guardrails: ['Flee all combat', 'Do not attempt trades (0 cargo)'],
       intervalSec: 30,
       nudgeAfterIdleSec: 270,
