@@ -224,6 +224,36 @@ export const getGameSnapshot = async () => {
     const slotsMatch = (document.body?.innerText || '').match(/(\d+)\s*\/\s*(\d+)\s*SLOTS?\s*USED/i);
     if (slotsMatch) extracted.taskSlots = { used: Number(slotsMatch[1]), total: Number(slotsMatch[2]) };
 
+    // "Destroyed Ships" table in the aside. Rows: Ship | Type | Sector | Destroyed(relative)
+    const destroyedTitle = Array.from(document.querySelectorAll('[data-slot="card-title"]'))
+      .find((n) => /destroyed\s+ships/i.test(n.innerText || ''));
+    const destroyedShips = [];
+    if (destroyedTitle) {
+      const card = destroyedTitle.closest('[data-slot="card"]');
+      const rows = card?.querySelectorAll('tbody tr') || [];
+      for (const tr of rows) {
+        const cells = tr.querySelectorAll('td');
+        if (cells.length < 4) continue;
+        destroyedShips.push({
+          name: cells[0]?.innerText?.trim(),
+          type: cells[1]?.innerText?.trim(),
+          sector: toNum(cells[2]?.innerText),
+          destroyedAgo: cells[3]?.innerText?.trim()
+        });
+      }
+    }
+    extracted.destroyedShips = destroyedShips;
+
+    // Also scrape corp RPC data dump if the developer logs panel happens to be open —
+    // it contains exact destroyed_at timestamps.
+    const corpBlob = (document.body?.innerText || '').match(/destroyed_ships":\s*\[[^\]]*\]/);
+    if (corpBlob) {
+      try {
+        const arr = JSON.parse('[' + corpBlob[0].replace(/^destroyed_ships":\s*/, '') + ']')[0];
+        if (Array.isArray(arr)) extracted.destroyedShipsRpc = arr;
+      } catch { /* ignore */ }
+    }
+
     const chatScroll = document.querySelector('[data-slot="scroll-area-viewport"], .scroll-area-viewport, [data-radix-scroll-area-viewport]');
     const lastMessages = [];
     if (chatScroll) {

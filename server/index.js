@@ -4,7 +4,7 @@ import { createMission, listMissions, getMission, abortMission, subscribeMission
 import { loadMissionTemplates, saveMissionTemplate, deleteMissionTemplate } from './templates.js';
 import { credentialsStatus, setCredentials, clearCredentials } from './credentials.js';
 import { startAutopilot, stopAutopilot, getAutopilotState, subscribeAutopilotLog } from './autopilot.js';
-import { getIntel, addManualEvent, deleteEvent, clearIntel, observe as intelObserve } from './intel.js';
+import { getIntel, addManualEvent, updateEvent as updateIntelEvent, deleteEvent, clearIntel, observe as intelObserve } from './intel.js';
 
 const PORT = Number(process.env.PORT || 5570);
 const HOST = process.env.HOST || '127.0.0.1';
@@ -116,8 +116,21 @@ app.post('/api/intel/events', (req, res) => {
   res.json(ev);
 });
 
+app.patch('/api/intel/events/:id', (req, res) => {
+  res.json(updateIntelEvent(req.params.id, req.body || {}));
+});
+
 app.delete('/api/intel/events/:id', (req, res) => {
   res.json(deleteEvent(req.params.id));
+});
+
+app.post('/api/intel/query-attackers', async (req, res) => {
+  const { ships } = req.body || {};
+  const shipList = Array.isArray(ships) && ships.length ? ships.join(', ') : 'our destroyed ships';
+  const prompt = `Quick intel request: use event_query to look up the combat events for ${shipList}. For each one, tell me the attacker's player name and sector. No need to act on it — just report the names and sectors.`;
+  const send = await (await import('./cdp.js')).sendAssistantPrompt(prompt).catch((e) => ({ ok: false, error: e.message }));
+  log('📜', 'Asked agent to identify attackers', { ships: shipList, ok: send.ok });
+  res.json({ ok: !!send.ok, send, prompt });
 });
 
 app.delete('/api/intel', (_req, res) => {

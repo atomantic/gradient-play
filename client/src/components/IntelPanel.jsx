@@ -1,5 +1,5 @@
 import React, { useEffect, useState } from 'react';
-import { Skull, MapPin, UserX, Plus, Trash2, RefreshCcw } from 'lucide-react';
+import { Skull, MapPin, UserX, Plus, Trash2, RefreshCcw, Edit2, Search } from 'lucide-react';
 
 const eventColor = (type) => {
   if (/destroy|destroyed/i.test(type)) return 'text-rose-400';
@@ -14,6 +14,9 @@ export const IntelPanel = () => {
   const [data, setData] = useState({ events: [], players: [], sectors: [] });
   const [form, setForm] = useState({ type: 'destroyed', ship: '', attacker: '', sector: '', note: '' });
   const [adding, setAdding] = useState(false);
+  const [editingId, setEditingId] = useState(null);
+  const [editForm, setEditForm] = useState({});
+  const [queryMsg, setQueryMsg] = useState(null);
 
   const refresh = async () => {
     const r = await fetch('/api/intel').then((r) => r.json());
@@ -56,6 +59,37 @@ export const IntelPanel = () => {
     await refresh();
   };
 
+  const queryAttackers = async () => {
+    const destroyedShips = [...new Set(data.events
+      .filter((e) => /destroy/i.test(e.type) && e.ship && !e.attacker)
+      .map((e) => e.ship))];
+    if (destroyedShips.length === 0) {
+      setQueryMsg('no unidentified destructions to ask about');
+      return;
+    }
+    setQueryMsg('asking agent…');
+    const r = await fetch('/api/intel/query-attackers', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ ships: destroyedShips })
+    }).then((r) => r.json());
+    setQueryMsg(r.ok ? `asked agent — check chat and fill in attackers manually` : `failed: ${r.send?.error}`);
+  };
+
+  const saveEdit = async (id) => {
+    await fetch(`/api/intel/events/${id}`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        attacker: editForm.attacker || null,
+        sector: editForm.sector ? Number(editForm.sector) : null,
+        note: editForm.note || null
+      })
+    });
+    setEditingId(null);
+    await refresh();
+  };
+
   return (
     <div className="rounded-lg border border-slate-800 bg-slate-900/40 p-3 flex flex-col h-full overflow-hidden">
       <div className="flex items-center justify-between border-b border-slate-800 pb-2 mb-2">
@@ -68,6 +102,10 @@ export const IntelPanel = () => {
             className="p-1 rounded border border-slate-700 hover:border-cyan-500 text-slate-400" title="Rescan DOM now">
             <RefreshCcw className="w-3 h-3" />
           </button>
+          <button onClick={queryAttackers}
+            className="p-1 rounded border border-slate-700 hover:border-amber-500 text-amber-300" title="Ask agent to identify attackers">
+            <Search className="w-3 h-3" />
+          </button>
           <button onClick={() => setAdding((v) => !v)}
             className="px-2 py-1 rounded border border-slate-700 hover:border-cyan-500 text-xs flex items-center gap-1">
             <Plus className="w-3 h-3" /> Log
@@ -78,6 +116,7 @@ export const IntelPanel = () => {
           </button>
         </div>
       </div>
+      {queryMsg ? <div className="text-[11px] text-amber-300 mb-2">{queryMsg}</div> : null}
 
       {adding ? (
         <div className="text-[11px] space-y-1 mb-2 p-2 rounded border border-slate-800 bg-slate-950">
@@ -154,7 +193,25 @@ export const IntelPanel = () => {
           <div className="text-xs text-slate-500 text-center py-8">No events logged yet.</div>
         ) : (
           <ul className="divide-y divide-slate-800">
-            {data.events.map((e) => (
+            {data.events.map((e) => editingId === e.id ? (
+              <li key={e.id} className="px-2 py-1.5 text-[11px] bg-slate-950">
+                <div className="flex items-center gap-1 mb-1">
+                  <span className="text-slate-500 w-28 shrink-0 font-mono">{e.ship}</span>
+                  <input value={editForm.attacker || ''} onChange={(e) => setEditForm({ ...editForm, attacker: e.target.value })}
+                    placeholder="attacker" className="bg-slate-900 border border-slate-800 rounded px-1 py-0.5 flex-1" />
+                  <input value={editForm.sector || ''} onChange={(e) => setEditForm({ ...editForm, sector: e.target.value })}
+                    placeholder="sector" className="bg-slate-900 border border-slate-800 rounded px-1 py-0.5 w-16" />
+                </div>
+                <input value={editForm.note || ''} onChange={(e) => setEditForm({ ...editForm, note: e.target.value })}
+                  placeholder="note" className="w-full bg-slate-900 border border-slate-800 rounded px-1 py-0.5 mb-1" />
+                <div className="flex items-center gap-1">
+                  <button onClick={() => saveEdit(e.id)}
+                    className="px-2 py-0.5 rounded bg-cyan-600 hover:bg-cyan-500 text-white">Save</button>
+                  <button onClick={() => setEditingId(null)}
+                    className="px-2 py-0.5 rounded border border-slate-700">Cancel</button>
+                </div>
+              </li>
+            ) : (
               <li key={e.id} className="px-2 py-1.5 text-[11px] flex gap-2">
                 <span className="text-slate-600 w-28 shrink-0 font-mono">{fmtTs(e.ts)}</span>
                 <span className={`${eventColor(e.type)} uppercase w-20 shrink-0`}>{e.type}</span>
@@ -163,11 +220,16 @@ export const IntelPanel = () => {
                     {e.ship ? <span className="text-slate-100 font-mono mr-1">{e.ship}</span> : null}
                     {e.attacker ? <span className="text-rose-300 mr-1">by {e.attacker}</span> : null}
                     {e.sector != null ? <span className="text-amber-300 mr-1">@{e.sector}</span> : null}
+                    {e.destroyedAgo ? <span className="text-slate-500 text-[10px] mr-1">({e.destroyedAgo})</span> : null}
                     <span className="text-slate-500 text-[10px]">[{e.source}]</span>
                   </div>
                   {e.note ? <div className="text-slate-500 text-[10px] truncate">{e.note}</div> : null}
                   {e.snippet ? <div className="text-slate-600 text-[10px] truncate">{e.snippet}</div> : null}
                 </div>
+                <button onClick={() => { setEditingId(e.id); setEditForm({ attacker: e.attacker || '', sector: e.sector != null ? String(e.sector) : '', note: e.note || '' }); }}
+                  className="text-slate-600 hover:text-cyan-400 shrink-0">
+                  <Edit2 className="w-3 h-3" />
+                </button>
                 <button onClick={() => deleteEvent(e.id)}
                   className="text-slate-600 hover:text-rose-400 shrink-0">
                   <Trash2 className="w-3 h-3" />

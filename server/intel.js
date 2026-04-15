@@ -36,12 +36,22 @@ const save = (store) => {
 let store = load();
 
 const addEvent = (ev) => {
-  const stamped = { id: randomUUID(), ts: Date.now(), ...ev };
+  const stamped = { id: randomUUID(), ts: ev.ts || Date.now(), source: 'manual', ...ev };
+  // Remove the ts override — keep whatever callers passed.
+  if (ev.ts) stamped.ts = ev.ts;
   store.events.push(stamped);
   // Keep 500 most recent.
   if (store.events.length > 500) store.events.splice(0, store.events.length - 500);
   save(store);
   return stamped;
+};
+
+export const updateEvent = (id, patch) => {
+  const ev = store.events.find((e) => e.id === id);
+  if (!ev) return { ok: false, error: 'not found' };
+  Object.assign(ev, patch);
+  save(store);
+  return { ok: true, event: ev };
 };
 
 // Chat patterns for hostile events. Each captures (ship?, attacker?, sector?).
@@ -104,6 +114,41 @@ const seenMsgKeys = new Set();
 export const observe = (snapshot) => {
   const ex = snapshot?.extracted || {};
   const added = [];
+
+  // "Destroyed Ships" table — authoritative list with sector + rough when.
+  // Upsert one event per ship+sector; if the user had a manual record with a
+  // missing sector, patch it in place rather than creating a duplicate.
+  for (const row of ex.destroyedShips || []) {
+    if (!row?.name) continue;
+    const existing = store.events.find((e) =>
+      e.type === 'destroyed' && e.ship && e.ship.toLowerCase() === row.name.toLowerCase());
+    if (existing) {
+      const patched = {};
+      if (existing.sector == null && row.sector != null) patched.sector = row.sector;
+      if (!existing.destroyedAgo && row.destroyedAgo) patched.destroyedAgo = row.destroyedAgo;
+      if (Object.keys(patched).length) {
+        Object.assign(existing, patched, { source: existing.source === 'manual' ? 'manual+dom' : 'dom' });
+        save(store);
+      }
+      continue;
+    }
+    // Parse destroyed_at timestamp from RPC blob if available.
+    let ts = Date.now();
+    const rpc = (ex.destroyedShipsRpc || []).find((r) => r.name === row.name);
+    if (rpc?.destroyed_at) {
+      const t = Date.parse(rpc.destroyed_at);
+      if (!isNaN(t)) ts = t;
+    }
+    added.push(addEvent({
+      type: 'destroyed',
+      source: 'dom-table',
+      ship: row.name,
+      shipType: row.type,
+      sector: row.sector,
+      destroyedAgo: row.destroyedAgo,
+      ts
+    }));
+  }
 
   // DOM-based: ships marked DESTROYED, and ships that disappeared from the fleet.
   const currentByName = new Map();
