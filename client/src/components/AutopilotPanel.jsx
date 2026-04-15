@@ -28,10 +28,13 @@ const formatEntry = (e) => {
     if (!s) return 'poll (no snapshot)';
     const running = s.tasksRunning ?? 0;
     const ships = (s.ships || []).map((sh) => `${sh.name.split(' ').pop()}:${sh.warp ?? '-'}${sh.active ? '●' : '○'}`).join(' ');
-    return `poll  tasks=${running}  bank=${s.creditsBank}  hand=${s.creditsOnHand}  [${ships}]  decisions=${e.decisionCount}`;
+    const cap = e.capped ? ' CAPPED' : '';
+    return `poll  tasks=${running}${cap}  bank=${s.creditsBank}  hand=${s.creditsOnHand}  [${ships}]  decisions=${e.decisionCount}`;
   }
   if (e.type === 'decision') return (e.ship ? `[${e.ship.split(' ').pop()}] ` : '') + e.text;
-  if (e.type === 'event') return `[${e.ship?.split(' ').pop() || '?'}] ${e.type === 'event' ? e.snippet : ''} — cooldown cleared`;
+  if (e.type === 'event' && e.intelType) return `[${e.ship?.split(' ').pop() || '?'}] intel: ${e.intelType}${e.attacker ? ' by ' + e.attacker : ''}${e.sector ? ' @' + e.sector : ''}`;
+  if (e.type === 'event') return `[${e.ship?.split(' ').pop() || '?'}] ${e.snippet || ''} — cooldown cleared`;
+  if (e.intelType === 'cap-hit' || e.type === 'cap-hit') return `corp task cap hit — holding off on new trade/explore until a slot frees`;
   if (e.type === 'error') return 'error: ' + e.error;
   if (e.type === 'start') return 'autopilot started';
   if (e.type === 'stop') return 'autopilot stopped';
