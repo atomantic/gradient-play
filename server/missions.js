@@ -1,5 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import { getGameSnapshot, sendAssistantPrompt } from './cdp.js';
+import { dangerousSectors } from './intel.js';
 
 const missions = new Map();
 const logSubscribers = new Map();
@@ -20,6 +21,15 @@ const evaluateCondition = (cond, snapshot) => {
 
 const shipPhrase = (spec) =>
   spec.targetShip ? `the ${spec.targetShip}` : 'the fleet';
+
+// Appends routing guidance for a recall-to-megaport command: name the
+// known-hostile sectors from intel so the agent plots around them.
+const safeRoutingClause = () => {
+  const bad = dangerousSectors();
+  if (!bad.length) return 'Pick a safe megaport.';
+  const list = bad.slice(0, 8).join(', ');
+  return `Avoid sectors ${list} — we've had ships destroyed there. Pick a safe megaport and plot around those sectors if needed.`;
+};
 
 const buildKickoffPrompt = (spec) => {
   const lines = [];
@@ -63,17 +73,19 @@ const reasonPhrase = (reason, snapshot) => {
 
 const buildAbortPrompt = (spec, reason, snapshot) => {
   const who = shipPhrase(spec);
+  const routing = safeRoutingClause();
   if (reason === 'user-abort' || reason === 'user') {
-    return `Stand down on ${who} — park at the nearest megaport and wait for my next call.`;
+    return `Stand down on ${who} — recall it to a safe megaport, recharge warp to full, and wait for my next call. ${routing}`;
   }
   const phrase = reasonPhrase(reason, snapshot);
-  return `Hey, break off whatever ${who} is doing — ${phrase}. Head to the nearest megaport, recharge, and wait for orders.`;
+  return `Hey, break off whatever ${who} is doing — ${phrase}. Recall it to a safe megaport and recharge warp to full. ${routing} Then wait for orders.`;
 };
 
 const buildStopPrompt = (spec, reason, snapshot) => {
   const who = shipPhrase(spec);
   const phrase = reasonPhrase(reason, snapshot);
-  return `Nice, we hit the target on ${who} — ${phrase}. Park the task and wait for my next call.`;
+  const routing = safeRoutingClause();
+  return `Nice, we hit the target on ${who} — ${phrase}. Park the task, recall ${who} to a safe megaport, and top off warp. ${routing} Await further orders.`;
 };
 
 /**

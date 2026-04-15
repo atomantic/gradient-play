@@ -1,5 +1,11 @@
 import { getGameSnapshot, sendAssistantPrompt } from './cdp.js';
-import { observe as intelObserve } from './intel.js';
+import { observe as intelObserve, dangerousSectors } from './intel.js';
+
+const safeRoutingClause = () => {
+  const bad = dangerousSectors();
+  if (!bad.length) return '';
+  return ` Steer clear of sectors ${bad.slice(0, 8).join(', ')} — we've lost ships there.`;
+};
 
 const DEFAULTS = {
   pollIntervalSec: 60,
@@ -167,7 +173,7 @@ const decide = (snapshot) => {
         out.push({
           key,
           ship: s.name,
-          text: `Heads up — the ${s.name} is down to ${s.warpPower} warp. Pull it off whatever it's doing, route to the nearest megaport, and recharge before it gets stranded.`
+          text: `Heads up — the ${s.name} is down to ${s.warpPower} warp. Pull it off whatever it's doing, route to a safe megaport, and recharge before it gets stranded.${safeRoutingClause()}`
         });
       }
       continue; // don't stack a trade order on a low-fuel ship this tick
