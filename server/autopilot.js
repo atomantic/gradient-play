@@ -272,18 +272,28 @@ const decide = (snapshot) => {
     }
   }
 
-  // Keep the local task engine (primary ship) slot in use. Periodic federation
-  // trade-loop directive for the Kestrel. Long cooldown to avoid nagging — this
-  // fires once every primaryDispatchCooldownSec (default 20m) as a reaffirmation.
+  // Keep the local task engine (primary ship) slot in use.
+  // We can tell from DOM whether the Kestrel already has a task: the task cards
+  // list every working task, and corp ships mark themselves ACTIVE in the fleet
+  // panel. If workingTaskCount > activeCorpShips, the extra task is the primary's.
   if (cfg.enabled.primary && ex.shipName) {
     const primary = ships.find((s) => s.primary);
-    if (primary && primary.warpPower != null && primary.warpPower >= cfg.minWarp) {
+    const workingTaskCount = (ex.tasks || []).filter((t) => t.working).length;
+    const activeCorpCount = activeCorp.length;
+    const primaryHasTask = workingTaskCount > activeCorpCount;
+
+    if (
+      primary &&
+      !primaryHasTask &&
+      primary.warpPower != null &&
+      primary.warpPower >= cfg.minWarp
+    ) {
       const key = 'primary:trade';
       if (canAct(key, cfg.primaryDispatchCooldownSec * 1000)) {
         out.push({
           key,
           ship: primary.name,
-          text: `If the ${primary.name} doesn't already have a running task, kick off a short NS trade loop for it strictly within federation space — we lack a Corsair-tier hull so no border or neutral sectors. 2–3 hops, refuel whenever warp gets low. Fedspace is safe from PvP, so just focus on margin.`
+          text: `Kick off a short NS trade loop for the ${primary.name}, strictly within federation space — we lack a Corsair-tier hull so no border or neutral sectors. 2–3 hops, refuel at a megaport whenever warp gets low. Fedspace is safe from PvP, so just optimize for margin.`
         });
       }
     }
