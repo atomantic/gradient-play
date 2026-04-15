@@ -4,14 +4,15 @@ import { Bot, Play, Square, Settings } from 'lucide-react';
 const DEFAULT_CONFIG = {
   pollIntervalSec: 60,
   minWarp: 50,
-  bankReserveMin: 25000,
-  onHandFloor: 2000,
+  onHandFloor: 5000,
+  depositExcessOver: 3000,
   decisionCooldownSec: 420,
   exploreMaxHops: 40,
   considerUpgrades: true,
   upgradeCreditsThreshold: 100000,
   corpTaskCap: 3,
-  enabled: { refuel: true, explore: true, trade: true, bank: true, upgrade: true }
+  primaryDispatchCooldownSec: 1200,
+  enabled: { refuel: true, explore: true, trade: true, bank: true, upgrade: true, primary: true }
 };
 
 const entryColor = (type) => ({
@@ -144,15 +145,15 @@ export const AutopilotPanel = () => {
                 className="bg-slate-950 border border-slate-800 rounded px-1 py-0.5 w-16" />
             </label>
             <label className="flex items-center gap-1">
-              <span className="text-slate-400 w-24">Bank reserve</span>
-              <input type="number" min={0} value={config.bankReserveMin}
-                onChange={(e) => setConfig({ ...config, bankReserveMin: Number(e.target.value) })}
-                className="bg-slate-950 border border-slate-800 rounded px-1 py-0.5 w-20" />
-            </label>
-            <label className="flex items-center gap-1">
               <span className="text-slate-400 w-24">On-hand floor</span>
               <input type="number" min={0} value={config.onHandFloor}
                 onChange={(e) => setConfig({ ...config, onHandFloor: Number(e.target.value) })}
+                className="bg-slate-950 border border-slate-800 rounded px-1 py-0.5 w-20" />
+            </label>
+            <label className="flex items-center gap-1">
+              <span className="text-slate-400 w-24">Sweep above</span>
+              <input type="number" min={0} value={config.depositExcessOver}
+                onChange={(e) => setConfig({ ...config, depositExcessOver: Number(e.target.value) })}
                 className="bg-slate-950 border border-slate-800 rounded px-1 py-0.5 w-20" />
             </label>
             <label className="flex items-center gap-1">

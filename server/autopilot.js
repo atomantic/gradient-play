@@ -10,19 +10,21 @@ const safeRoutingClause = () => {
 const DEFAULTS = {
   pollIntervalSec: 60,
   minWarp: 50,                    // below this: refuel
-  bankReserveMin: 25000,          // strategy.md: ~1x Kestrel replacement cost
-  onHandFloor: 2000,              // never drain on-hand below this via deposits
+  onHandFloor: 5000,              // working capital to keep on-hand for trades + fuel
+  depositExcessOver: 3000,        // if on-hand exceeds floor by this much, bank the difference
   decisionCooldownSec: 420,       // 7 min — longer than a typical refuel or task handoff
   exploreMaxHops: 40,
   considerUpgrades: true,
-  upgradeCreditsThreshold: 100000, // remind the agent to check upgrades when total hits this
-  corpTaskCap: 3,                  // game enforces 3 concurrent corp-ship tasks
+  upgradeCreditsThreshold: 100000,
+  corpTaskCap: 3,                 // fallback if DOM taskSlots.total isn't reported
+  primaryDispatchCooldownSec: 1200, // 20 min — how often to reaffirm the Kestrel's trade loop
   enabled: {
     refuel: true,
     explore: true,
     trade: true,
     bank: true,
-    upgrade: true
+    upgrade: true,
+    primary: true                 // keep the Kestrel working in fedspace trade
   }
 };
 
@@ -175,12 +177,16 @@ const decide = (snapshot) => {
   }
 
   // Role-balanced allocation for idle corp ships.
+  //
+  // The game exposes total task slots via "N/M SLOTS USED" (scraped as
+  // ex.taskSlots). Typical fleet shows 4 total — 1 local (player) + 3 corp.
+  // Use DOM's reported total when available, falling back to cfg.corpTaskCap.
+  //
   // Strategy (per strategy.md):
-  //   - Game enforces 3 concurrent corp-ship tasks.
   //   - Reserve 1 slot for a probe on explore/salvage (high map value).
-  //   - Fill the remaining slots with haulers on short trade loops in/near fedspace.
-  //   - Kestrel (primary) is hands-off; until we have a Corsair-tier hull we don't
-  //     auto-dispatch it. User drives it or launches a manual mission.
+  //   - Fill remaining corp slots with haulers on fedspace+adjacent trade loops.
+  //   - Kestrel (primary) gets a separate periodic fedspace-trade dispatch below,
+  //     occupying the local task engine slot.
   const corpShips = ships.filter((s) => !s.primary);
   const activeCorp = corpShips.filter((s) => s.active === true);
   const idleCorp = corpShips.filter((s) => s.active === false && s.warpPower != null && s.warpPower >= cfg.minWarp);
@@ -189,11 +195,17 @@ const decide = (snapshot) => {
   const idleProbes = idleCorp.filter((s) => shipKind(s.name) === 'probe');
   const idleHaulers = idleCorp.filter((s) => ['hauler', 'trader-light'].includes(shipKind(s.name)));
 
-  // Sort idle haulers by warp desc so we prefer the ones with runway.
   idleHaulers.sort((a, b) => (b.warpPower || 0) - (a.warpPower || 0));
   idleProbes.sort((a, b) => (b.warpPower || 0) - (a.warpPower || 0));
 
-  let remainingSlots = Math.max(0, cfg.corpTaskCap - activeCorp.length);
+  // Derive cap from DOM if present (reserve 1 slot for primary/local tasks).
+  // Example: taskSlots.total=4 → corpCap=3.
+  const domTotal = ex.taskSlots?.total;
+  const effectiveCorpCap = Math.min(
+    cfg.corpTaskCap,
+    domTotal != null ? Math.max(0, domTotal - 1) : Infinity
+  );
+  let remainingSlots = Math.max(0, effectiveCorpCap - activeCorp.length);
 
   // Reserve slot 1 for a probe (if no probe is already running and we have one idle).
   if (remainingSlots > 0 && cfg.enabled.explore && activeProbeCount === 0 && idleProbes.length > 0) {
@@ -223,38 +235,54 @@ const decide = (snapshot) => {
     remainingSlots -= 1;
   }
 
-  // Bank reserve: if bank is under target and we have enough on-hand to spare, deposit.
+  // Bank excess on-hand aggressively. Anything above cfg.onHandFloor is working
+  // capital risk — sweep it to the bank whenever we're docked. Runs independently
+  // of the bank balance (the bank has no ceiling; on-hand is the danger).
   if (cfg.enabled.bank) {
-    const bank = ex.creditsBank ?? 0;
     const onHand = ex.creditsOnHand ?? 0;
-    const need = cfg.bankReserveMin - bank;
-    const spare = onHand - cfg.onHandFloor;
-    if (need > 0 && spare >= 500) {
-      const amount = Math.min(need, spare);
-      const key = 'bank:reserve';
+    const excess = onHand - cfg.onHandFloor;
+    if (excess >= cfg.depositExcessOver) {
+      const key = 'bank:sweep';
       if (canAct(key, cooldownMs)) {
         out.push({
           key,
-          text: `Next time you're at a megaport, drop ${amount} credits in the bank — we want at least ${cfg.bankReserveMin} tucked away in case anything gets destroyed.`
+          text: `Next time you're at a megaport, deposit ${excess} credits in the bank — we're sitting on ${onHand} on-hand and only need about ${cfg.onHandFloor} for working capital. Extra credits are a destruction risk; the bank is safe.`
         });
       }
     }
   }
 
   // Upgrade: only fire when (a) we know the primary ship's next tier and (b) we can
-  // actually afford it while keeping the bank reserve. Ship ladder lives in code
-  // (from strategy.md) so we don't ask the agent to look anything up.
+  // actually afford it. Ship ladder lives in code (from strategy.md) so we don't
+  // ask the agent to look anything up.
   if (cfg.enabled.upgrade && cfg.considerUpgrades && ex.shipName) {
     const next = findNextUpgrade(ex.shipName);
     const bank = ex.creditsBank ?? 0;
     const onHand = ex.creditsOnHand ?? 0;
     const total = bank + onHand;
-    if (next && total >= next.price && bank >= cfg.bankReserveMin) {
+    if (next && total >= next.price) {
       const key = `upgrade:${next.name}`;
       if (canAct(key, cooldownMs * 2)) {
         out.push({
           key,
           text: `We've got ${total} credits — enough to trade up to a ${next.name} (${next.price}). When the ${ex.shipName} next hits a megaport, trade it in and buy the ${next.name}, then get back to trading in the new hull.`
+        });
+      }
+    }
+  }
+
+  // Keep the local task engine (primary ship) slot in use. Periodic federation
+  // trade-loop directive for the Kestrel. Long cooldown to avoid nagging — this
+  // fires once every primaryDispatchCooldownSec (default 20m) as a reaffirmation.
+  if (cfg.enabled.primary && ex.shipName) {
+    const primary = ships.find((s) => s.primary);
+    if (primary && primary.warpPower != null && primary.warpPower >= cfg.minWarp) {
+      const key = 'primary:trade';
+      if (canAct(key, cfg.primaryDispatchCooldownSec * 1000)) {
+        out.push({
+          key,
+          ship: primary.name,
+          text: `If the ${primary.name} doesn't already have a running task, kick off a short NS trade loop for it strictly within federation space (we still lack a Corsair-tier hull so no border/neutral sectors). 2–3 hops, refuel whenever warp gets low, flee any combat on sight.`
         });
       }
     }
