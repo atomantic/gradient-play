@@ -62,14 +62,15 @@ const builtins = [
     }
   },
   {
-    name: 'Probe: salvage patrol',
+    name: 'Probe: explore & salvage',
     spec: {
-      goal: 'Patrol unmapped space hunting for salvage drops from recent combat. Whenever you arrive in a sector, check for salvage — if there is any, claim it with salvage_collect (it has a 900s TTL so speed matters). Any credits picked up must be deposited in the bank at the next megaport visit — do not carry loose credits on the probe. Refuel whenever you need to. Between salvage finds, keep exploring new sectors to widen the search. You have no shields and only 10 fighters, so flee any combat immediately.',
+      goal: 'Primary mission: map new space. Move to unmapped sectors to widen our corp map. Secondary mission: opportunistic salvage. On arrival in any sector, check for salvage — if you find some, claim it immediately with salvage_collect (900s TTL) and deposit credits at the next megaport. Unless I have listed specific known salvage sectors in your guardrails, always default to unmapped sectors — combat is random, so coverage maximizes our hit rate. Flee any combat (0 shields, 10 fighters). Refuel as needed.',
       guardrails: [
-        'Flee every combat encounter — no exceptions',
+        'Primary: visit unmapped sectors — exploration is how we find salvage',
+        'On every sector arrival: check for salvage and claim it',
         'Deposit all credits at every megaport visit',
         'Refuel before warp power drops below 80',
-        'Prefer unmapped sectors to maximize salvage hit rate',
+        'Flee every combat encounter — no exceptions',
         'Do not engage garrisons or toll gates'
       ],
       intervalSec: 30,

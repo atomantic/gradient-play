@@ -192,7 +192,7 @@ const decide = (snapshot) => {
         out.push({
           key,
           ship: s.name,
-          text: `The ${s.name} is idle — put it on an exploration task: visit every unvisited sector within ${cfg.exploreMaxHops} hops of its current position.`
+          text: `The ${s.name} is idle — put it on explore-and-salvage duty: map unvisited sectors within ${cfg.exploreMaxHops} hops, and on every sector arrival check for salvage and claim it (900s TTL). Deposit any credits at the next megaport. Flee any combat; refuel as needed.`
         });
       }
     } else if ((kind === 'hauler' || kind === 'trader-light') && cfg.enabled.trade) {
