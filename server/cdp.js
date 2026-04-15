@@ -274,30 +274,44 @@ export const sendAssistantPrompt = async (text) => {
 
 /**
  * Click the character tile matching `name` on the character_select screen.
- * Tiles are [role="button"] containing an uppercase span with the character name.
- * Returns { ok, error } — ok:true if selection succeeded or no dialog was showing.
+ *
+ * Tile structure (from CharacterSelect.tsx):
+ *   <div role="button" class="interactive-card ...">
+ *     ...
+ *     <span class="... uppercase ...">{character.name}</span>
+ *     <span class="...">{lastActiveString}</span>   (e.g. "5 minutes ago")
+ *   </div>
+ *
+ * We locate the name span by case-insensitive exact-text match, then click
+ * its closest [role="button"]. This tolerates multiple characters and the
+ * "NEW CHARACTER" create card (which isn't role=button).
  */
 export const selectCharacterIfNeeded = async (name) => {
   if (!name) return { ok: true, via: 'no-character-configured' };
   const page = await withPage();
-
-  const dialogVisible = await page.locator('[role="dialog"]:has-text("Select Character"), :text("Select Character")').first().isVisible().catch(() => false);
-  if (!dialogVisible) {
-    // Maybe the tiles are visible without the dialog matcher — fall through to locator query
-  }
-
   const target = name.trim();
-  const re = new RegExp(`^\\s*${target.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\s*$`, 'i');
 
-  const tile = page.locator('[role="button"]').filter({ hasText: re }).first();
-  const count = await tile.count();
-  if (!count) return { ok: true, via: 'no-tile-shown' };
-  if (!(await tile.isVisible().catch(() => false))) return { ok: true, via: 'tile-hidden' };
+  // Wait up to 4s for the dialog to appear.
+  const dialog = page.locator(':text("Select Character")').first();
+  await dialog.waitFor({ state: 'visible', timeout: 4000 }).catch(() => {});
 
-  await tile.click();
-  // After click, the dialog dismisses. Wait briefly for transition.
-  await page.waitForTimeout(500);
-  return { ok: true, via: `clicked:${target}` };
+  const clicked = await page.evaluate((want) => {
+    const spans = Array.from(document.querySelectorAll('span'));
+    const match = spans.find((s) => {
+      const t = (s.innerText || '').trim();
+      return t.toLowerCase() === want.toLowerCase();
+    });
+    if (!match) return { ok: false, reason: 'no-matching-span', spanCount: spans.length };
+    const tile = match.closest('[role="button"]');
+    if (!tile) return { ok: false, reason: 'no-parent-role-button' };
+    tile.scrollIntoView({ block: 'center' });
+    tile.click();
+    return { ok: true, tileText: (tile.innerText || '').replace(/\s+/g, ' ').trim().slice(0, 80) };
+  }, target);
+
+  if (!clicked.ok) return { ok: false, error: clicked.reason, target };
+  await page.waitForTimeout(700);
+  return { ok: true, via: `clicked:${target}`, tileText: clicked.tileText };
 };
 
 /**
