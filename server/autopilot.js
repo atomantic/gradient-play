@@ -17,7 +17,7 @@ const DEFAULTS = {
   considerUpgrades: true,
   upgradeCreditsThreshold: 100000,
   corpTaskCap: 3,                 // fallback if DOM taskSlots.total isn't reported
-  primaryDispatchCooldownSec: 1200, // 20 min — how often to reaffirm the Kestrel's trade loop
+  primaryDispatchCooldownSec: 300,  // 5 min — tight enough to refill the local slot quickly when a task ends
   enabled: {
     refuel: true,
     explore: true,
@@ -97,6 +97,7 @@ const parseAssistantEvents = (snapshot) => {
       events.push({
         type: pat.type,
         ship: ship.name,
+        isPrimary: !!ship.primary,
         roleWord: match[1],
         msgTs,
         snippet: m.replace(/\s+/g, ' ').slice(0, 200),
@@ -305,12 +306,16 @@ const runTick = async () => {
 
     // Chat-event scan: if the assistant reported "task ended after max steps"
     // (or similar) for a specific ship, clear that ship's cooldown keys so
-    // decide() re-dispatches on this same tick.
+    // decide() re-dispatches on this same tick. For the primary ship, also
+    // clear the primary:trade cooldown so the local slot refills immediately.
     const events = parseAssistantEvents(snapshot);
     for (const ev of events) {
       appendLog({ type: 'event', ...ev });
       for (const prefix of ev.clearsCooldownFor || []) {
         state.lastDecisionAt.delete(`${prefix}:${ev.ship}`);
+      }
+      if (ev.isPrimary) {
+        state.lastDecisionAt.delete('primary:trade');
       }
     }
 

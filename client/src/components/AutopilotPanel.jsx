@@ -11,7 +11,7 @@ const DEFAULT_CONFIG = {
   considerUpgrades: true,
   upgradeCreditsThreshold: 100000,
   corpTaskCap: 3,
-  primaryDispatchCooldownSec: 1200,
+  primaryDispatchCooldownSec: 300,
   enabled: { refuel: true, explore: true, trade: true, bank: true, upgrade: true, primary: true }
 };
 
