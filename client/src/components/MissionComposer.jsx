@@ -132,18 +132,40 @@ export const MissionComposer = ({ templates = [], ships = [], onCreate, onSaveTe
       </div>
 
       {editing ? (
-        <div className="flex items-center gap-2 text-[11px] rounded border border-slate-800 bg-slate-950 px-2 py-1">
-          <FileEdit className="w-3 h-3 text-cyan-400" />
-          <span className="text-slate-300 truncate flex-1">
-            editing: <span className="text-cyan-300 font-mono">{editing.name}</span>
-          </span>
-          <span className={`text-[9px] uppercase px-1 rounded ${
-            editing.source === 'builtin' ? 'bg-slate-800 text-slate-400' :
-            editing.source === 'override' ? 'bg-amber-950 text-amber-300' :
-            'bg-cyan-950 text-cyan-300'
-          }`}>
-            {editing.source}
-          </span>
+        <div className="rounded border border-slate-800 bg-slate-950 p-2 space-y-2">
+          <div className="flex items-center gap-2 text-[11px]">
+            <FileEdit className="w-3 h-3 text-cyan-400 shrink-0" />
+            <span className="text-slate-300 truncate flex-1">
+              editing: <span className="text-cyan-300 font-mono">{editing.name}</span>
+            </span>
+            <span className={`text-[9px] uppercase px-1 rounded shrink-0 ${
+              editing.source === 'builtin' ? 'bg-slate-800 text-slate-400' :
+              editing.source === 'override' ? 'bg-amber-950 text-amber-300' :
+              'bg-cyan-950 text-cyan-300'
+            }`}>
+              {editing.source}
+            </span>
+          </div>
+          <div className="flex items-center gap-1">
+            <button onClick={saveAsTemplate}
+              className="flex-1 px-2 py-1 rounded bg-cyan-600 hover:bg-cyan-500 text-white text-xs flex items-center justify-center gap-1"
+              title={editing.source === 'builtin' ? 'Create user override' : 'Save template changes'}>
+              <Save className="w-3 h-3" />
+              {editing.source === 'builtin' ? 'Save as override' : 'Save changes'}
+            </button>
+            {editing.source === 'override' || editing.source === 'user' ? (
+              <button onClick={resetTemplate}
+                className="px-2 py-1 rounded border border-rose-900 hover:border-rose-500 text-rose-300 text-xs flex items-center gap-1"
+                title={editing.builtin ? 'Delete override — restore built-in' : 'Delete user template'}>
+                {editing.builtin ? <RotateCcw className="w-3 h-3" /> : <Trash2 className="w-3 h-3" />}
+                {editing.builtin ? 'reset' : 'delete'}
+              </button>
+            ) : null}
+          </div>
+          <div className="text-[10px] text-slate-500">
+            Field changes are staged — click <span className="text-cyan-300">Save changes</span> to persist,
+            or <span className="text-slate-300">Launch mission</span> below to run this spec without saving.
+          </div>
         </div>
       ) : null}
 
@@ -212,24 +234,26 @@ export const MissionComposer = ({ templates = [], ships = [], onCreate, onSaveTe
 
       <div className="flex items-center gap-2 pt-2 border-t border-slate-800">
         <button onClick={create}
-          className="px-3 py-1 rounded bg-cyan-600 hover:bg-cyan-500 text-white text-sm">
+          className={`px-3 py-1 rounded text-sm ${editing ? 'bg-slate-700 hover:bg-slate-600 text-white' : 'bg-cyan-600 hover:bg-cyan-500 text-white'}`}
+          title={editing ? 'Run this spec as a one-off mission without saving template changes' : 'Launch this spec as a mission'}>
           Launch mission
         </button>
-        <input value={saveName} onChange={(e) => setSaveName(e.target.value)}
-          placeholder={editing ? 'template name' : 'save as…'}
-          className="flex-1 bg-slate-950 border border-slate-800 rounded px-2 py-1 text-xs" />
-        <button onClick={saveAsTemplate}
-          className="px-2 py-1 rounded border border-slate-700 hover:border-cyan-500 text-xs flex items-center gap-1"
-          title={editing?.builtin && editing.source === 'builtin' ? 'Save as override' : 'Save template'}>
-          <Save className="w-3 h-3" /> {editing?.builtin && editing.source === 'builtin' ? 'override' : 'save'}
-        </button>
-        {editing && (editing.source === 'override' || editing.source === 'user') ? (
-          <button onClick={resetTemplate}
-            className="px-2 py-1 rounded border border-rose-900 hover:border-rose-500 text-rose-300 text-xs flex items-center gap-1"
-            title={editing.builtin ? 'Reset to built-in' : 'Delete template'}>
-            {editing.builtin ? <RotateCcw className="w-3 h-3" /> : <Trash2 className="w-3 h-3" />}
-          </button>
-        ) : null}
+        {!editing ? (
+          <>
+            <input value={saveName} onChange={(e) => setSaveName(e.target.value)}
+              placeholder="save as new template…"
+              className="flex-1 bg-slate-950 border border-slate-800 rounded px-2 py-1 text-xs" />
+            <button onClick={saveAsTemplate}
+              disabled={!saveName.trim()}
+              className="px-2 py-1 rounded border border-slate-700 hover:border-cyan-500 disabled:opacity-40 disabled:cursor-not-allowed text-xs flex items-center gap-1">
+              <Save className="w-3 h-3" /> save new
+            </button>
+          </>
+        ) : (
+          <div className="flex-1 text-[10px] text-slate-500 text-right">
+            editing <span className="text-cyan-300 font-mono">{editing.name}</span> — use the Save changes button above
+          </div>
+        )}
       </div>
     </div>
   );
