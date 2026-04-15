@@ -48,6 +48,22 @@ app.post('/api/assistant/prompt', async (req, res) => {
   res.json(result);
 });
 
+app.post('/api/fleet/recall-refuel', async (_req, res) => {
+  const { getGameSnapshot } = await import('./cdp.js');
+  const { dangerousSectors } = await import('./intel.js');
+  const snap = await getGameSnapshot();
+  const ships = (snap?.extracted?.ships || []).map((s) => s.name).filter(Boolean);
+  const bad = dangerousSectors();
+  const routing = bad.length
+    ? `Prefer safe routes around sectors ${bad.slice(0, 8).join(', ')} — we've lost ships there. If a ship's warp is too low to reach a safe port, send it to the closest megaport instead; stranded is worse than risky.`
+    : `Send each ship to the closest safe megaport.`;
+  const fleetLabel = ships.length ? ships.join(', ') : 'the whole corp fleet';
+  const text = `Fleet-wide recall. Pause any active tasks on ${fleetLabel}, recall every ship to a safe megaport, and recharge each one's warp power to full. ${routing} Once a ship is full and docked, leave it idle and standing by — I'll give fresh orders after.`;
+  log('🚨', 'Fleet recall & refuel', { shipCount: ships.length, dangerous: bad.length });
+  const result = await sendAssistantPrompt(text);
+  res.json({ ok: !!result.ok, text, shipCount: ships.length, send: result });
+});
+
 app.get('/api/missions', (_req, res) => {
   res.json({ missions: listMissions() });
 });

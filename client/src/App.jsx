@@ -6,6 +6,7 @@ import { MissionComposer } from './components/MissionComposer.jsx';
 import { MissionList } from './components/MissionList.jsx';
 import { MissionDetail } from './components/MissionDetail.jsx';
 import { DirectChat } from './components/DirectChat.jsx';
+import { FleetActions } from './components/FleetActions.jsx';
 import { CredentialsPanel } from './components/CredentialsPanel.jsx';
 import { AutopilotPanel } from './components/AutopilotPanel.jsx';
 import { IntelPanel } from './components/IntelPanel.jsx';
@@ -81,6 +82,7 @@ export default function App() {
       <main className="flex-1 grid grid-cols-12 gap-4 p-4 max-w-[1600px] w-full mx-auto">
         <aside className="col-span-12 lg:col-span-3 space-y-4">
           <HUD snapshot={snapshot} />
+          <FleetActions />
           <CredentialsPanel />
           <DirectChat />
         </aside>
