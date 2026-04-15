@@ -3,6 +3,7 @@ import { connectGamePage, getGameSnapshot, sendAssistantPrompt, getConnectionSta
 import { createMission, listMissions, getMission, abortMission, subscribeMissionLog } from './missions.js';
 import { loadMissionTemplates, saveMissionTemplate, deleteMissionTemplate } from './templates.js';
 import { credentialsStatus, setCredentials, clearCredentials } from './credentials.js';
+import { startAutopilot, stopAutopilot, getAutopilotState, subscribeAutopilotLog } from './autopilot.js';
 
 const PORT = Number(process.env.PORT || 5570);
 const HOST = process.env.HOST || '127.0.0.1';
@@ -97,6 +98,33 @@ app.get('/api/missions/:id/stream', (req, res) => {
   req.on('close', () => {
     unsubscribe();
   });
+});
+
+app.get('/api/autopilot', (_req, res) => {
+  res.json(getAutopilotState());
+});
+
+app.post('/api/autopilot/start', (req, res) => {
+  const result = startAutopilot(req.body || {});
+  log(result.ok ? '🤖' : '⚠️', `Autopilot start ${result.ok ? 'ok' : 'failed'}`, { error: result.error });
+  res.json(result);
+});
+
+app.post('/api/autopilot/stop', (_req, res) => {
+  const result = stopAutopilot();
+  log('🛑', 'Autopilot stopped');
+  res.json(result);
+});
+
+app.get('/api/autopilot/stream', (req, res) => {
+  res.setHeader('Content-Type', 'text/event-stream');
+  res.setHeader('Cache-Control', 'no-cache');
+  res.setHeader('Connection', 'keep-alive');
+  res.flushHeaders?.();
+  const write = (event, data) => res.write(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`);
+  write('snapshot', getAutopilotState());
+  const unsubscribe = subscribeAutopilotLog((entry) => write('log', entry));
+  req.on('close', () => unsubscribe());
 });
 
 app.get('/api/credentials', (_req, res) => {
