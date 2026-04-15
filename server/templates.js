@@ -89,7 +89,23 @@ export const loadMissionTemplates = () => {
   const user = fs.existsSync(FILE)
     ? JSON.parse(fs.readFileSync(FILE, 'utf8'))
     : [];
-  return [...builtins, ...user];
+  const userByName = new Map(user.map((t) => [t.name, t]));
+  const out = [];
+  for (const b of builtins) {
+    const u = userByName.get(b.name);
+    if (u) {
+      out.push({ name: b.name, spec: u.spec, source: 'override', builtin: true });
+    } else {
+      out.push({ name: b.name, spec: b.spec, source: 'builtin', builtin: true });
+    }
+  }
+  const builtinNames = new Set(builtins.map((b) => b.name));
+  for (const u of user) {
+    if (!builtinNames.has(u.name)) {
+      out.push({ name: u.name, spec: u.spec, source: 'user', builtin: false });
+    }
+  }
+  return out;
 };
 
 export const saveMissionTemplate = (name, spec) => {

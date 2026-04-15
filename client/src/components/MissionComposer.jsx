@@ -1,5 +1,5 @@
 import React, { useState } from 'react';
-import { Plus, Save, Trash2 } from 'lucide-react';
+import { Plus, Save, Trash2, RotateCcw, FileEdit } from 'lucide-react';
 
 const METRICS = ['warpPower', 'credits', 'creditsOnHand', 'creditsBank', 'fighters', 'shields', 'cargo', 'sector'];
 const OPS = ['<', '<=', '>', '>=', '=='];
@@ -54,10 +54,20 @@ export const MissionComposer = ({ templates = [], ships = [], onCreate, onSaveTe
   const [spec, setSpec] = useState(emptySpec());
   const [guardrailText, setGuardrailText] = useState('');
   const [saveName, setSaveName] = useState('');
+  const [editing, setEditing] = useState(null); // { name, source } of loaded template
 
   const applyTemplate = (t) => {
     setSpec({ ...emptySpec(), ...t.spec });
     setGuardrailText((t.spec.guardrails || []).join('\n'));
+    setEditing({ name: t.name, source: t.source, builtin: t.builtin });
+    setSaveName(t.name);
+  };
+
+  const clearEditing = () => {
+    setEditing(null);
+    setSpec(emptySpec());
+    setGuardrailText('');
+    setSaveName('');
   };
 
   const buildSpec = () => ({
@@ -71,25 +81,71 @@ export const MissionComposer = ({ templates = [], ships = [], onCreate, onSaveTe
     onCreate(built);
   };
 
-  const saveAsTemplate = () => {
+  const saveAsTemplate = async () => {
     if (!saveName.trim()) return;
-    onSaveTemplate(saveName.trim(), buildSpec());
-    setSaveName('');
+    await onSaveTemplate(saveName.trim(), buildSpec());
+    // If we were editing a builtin, this save created an override; refresh the marker.
+    if (editing?.builtin) setEditing({ ...editing, source: 'override' });
+    else if (!editing) setEditing({ name: saveName.trim(), source: 'user', builtin: false });
+  };
+
+  const resetTemplate = async () => {
+    if (!editing?.name) return;
+    await onDeleteTemplate(editing.name);
+    // For builtins: deleting the user override restores the builtin seed.
+    // For user-only templates: the template is gone; clear the composer.
+    if (editing.builtin) {
+      const fresh = templates.find((t) => t.name === editing.name);
+      if (fresh) applyTemplate(fresh);
+      else clearEditing();
+    } else {
+      clearEditing();
+    }
   };
 
   return (
     <div className="rounded-lg border border-slate-800 bg-slate-900/40 p-3 space-y-3">
       <div className="flex items-center justify-between">
-        <div className="text-xs uppercase tracking-wider text-slate-400">New mission</div>
-        <select onChange={(e) => {
-          const t = templates[Number(e.target.value)];
-          if (t) applyTemplate(t);
-          e.target.value = '';
-        }} className="bg-slate-950 border border-slate-800 rounded text-xs px-1 py-0.5">
-          <option value="">load template…</option>
-          {templates.map((t, i) => <option key={t.name} value={i}>{t.name}</option>)}
-        </select>
+        <div className="text-xs uppercase tracking-wider text-slate-400">
+          {editing ? 'Edit template' : 'New mission'}
+        </div>
+        <div className="flex items-center gap-1">
+          <select onChange={(e) => {
+            const t = templates[Number(e.target.value)];
+            if (t) applyTemplate(t);
+            e.target.value = '';
+          }} className="bg-slate-950 border border-slate-800 rounded text-xs px-1 py-0.5">
+            <option value="">load template…</option>
+            {templates.map((t, i) => (
+              <option key={t.name} value={i}>
+                {t.name}{t.source === 'override' ? ' ✎' : t.source === 'user' ? ' •' : ''}
+              </option>
+            ))}
+          </select>
+          {editing ? (
+            <button onClick={clearEditing}
+              className="px-2 py-0.5 rounded border border-slate-700 hover:border-slate-500 text-[10px] text-slate-400">
+              new
+            </button>
+          ) : null}
+        </div>
       </div>
+
+      {editing ? (
+        <div className="flex items-center gap-2 text-[11px] rounded border border-slate-800 bg-slate-950 px-2 py-1">
+          <FileEdit className="w-3 h-3 text-cyan-400" />
+          <span className="text-slate-300 truncate flex-1">
+            editing: <span className="text-cyan-300 font-mono">{editing.name}</span>
+          </span>
+          <span className={`text-[9px] uppercase px-1 rounded ${
+            editing.source === 'builtin' ? 'bg-slate-800 text-slate-400' :
+            editing.source === 'override' ? 'bg-amber-950 text-amber-300' :
+            'bg-cyan-950 text-cyan-300'
+          }`}>
+            {editing.source}
+          </span>
+        </div>
+      ) : null}
 
       <div>
         <div className="text-[11px] uppercase tracking-wide text-slate-500 mb-1">Target ship</div>
@@ -160,12 +216,20 @@ export const MissionComposer = ({ templates = [], ships = [], onCreate, onSaveTe
           Launch mission
         </button>
         <input value={saveName} onChange={(e) => setSaveName(e.target.value)}
-          placeholder="template name"
+          placeholder={editing ? 'template name' : 'save as…'}
           className="flex-1 bg-slate-950 border border-slate-800 rounded px-2 py-1 text-xs" />
         <button onClick={saveAsTemplate}
-          className="px-2 py-1 rounded border border-slate-700 hover:border-cyan-500 text-xs flex items-center gap-1">
-          <Save className="w-3 h-3" /> save
+          className="px-2 py-1 rounded border border-slate-700 hover:border-cyan-500 text-xs flex items-center gap-1"
+          title={editing?.builtin && editing.source === 'builtin' ? 'Save as override' : 'Save template'}>
+          <Save className="w-3 h-3" /> {editing?.builtin && editing.source === 'builtin' ? 'override' : 'save'}
         </button>
+        {editing && (editing.source === 'override' || editing.source === 'user') ? (
+          <button onClick={resetTemplate}
+            className="px-2 py-1 rounded border border-rose-900 hover:border-rose-500 text-rose-300 text-xs flex items-center gap-1"
+            title={editing.builtin ? 'Reset to built-in' : 'Delete template'}>
+            {editing.builtin ? <RotateCcw className="w-3 h-3" /> : <Trash2 className="w-3 h-3" />}
+          </button>
+        ) : null}
       </div>
     </div>
   );
