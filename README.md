@@ -8,7 +8,7 @@ Strategy playbook that informs the prompt templates: [strategy.md](./strategy.md
 
 ## Corp
 
-Built and maintained alongside the **Society Against Mass Entropy** corp. If you want to fly with the fleet, join in-game with invite code `61cd832`.
+Built and maintained alongside the **[Society Against Mass Entropy](https://github.com/Society-Against-Mass-Entropy/same)** corp. If you want to fly with the fleet, join in-game with invite code `61cd832`.
 
 Corp-scale play is where the companion earns its keep — autonomous Light Haulers on short trade loops + an Autonomous Probe on exploration sweeps, each driven by its own mission with per-ship abort conditions.
 
