@@ -33,7 +33,6 @@ const builtins = [
       guardrails: [
         'Refuel before warp power hits 50; do not run out mid-route',
         'Prioritize NS (Neuro-Symbolics) routes for highest margin',
-        'Keep at least 1000 credits in bank as insurance against destruction',
         'Do not engage combat — flee if attacked'
       ],
       intervalSec: 30,
