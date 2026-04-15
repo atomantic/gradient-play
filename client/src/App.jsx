@@ -60,6 +60,13 @@ export default function App() {
     await refresh();
   };
 
+  const handleUntrack = async (id) => {
+    if (!confirm('Remove this mission from tracking? No stop command will be sent to the game agent.')) return;
+    await api.untrackMission(id);
+    if (selectedId === id) setSelectedId(null);
+    await refresh();
+  };
+
   return (
     <div className="min-h-full flex flex-col">
       <header className="border-b border-slate-800 bg-slate-900/80 backdrop-blur px-6 py-4">
@@ -100,6 +107,7 @@ export default function App() {
             selectedId={selectedId}
             onSelect={setSelectedId}
             onAbort={handleAbort}
+            onUntrack={handleUntrack}
           />
         </section>
 
@@ -120,7 +128,7 @@ export default function App() {
           </div>
           <div className="flex-1 min-h-0">
             {rightTab === 'mission' ? (
-              <MissionDetail missionId={selectedId} onAbort={handleAbort} />
+              <MissionDetail missionId={selectedId} onAbort={handleAbort} onUntrack={handleUntrack} />
             ) : rightTab === 'autopilot' ? (
               <AutopilotPanel />
             ) : (

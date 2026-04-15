@@ -1,5 +1,5 @@
 import React from 'react';
-import { Square } from 'lucide-react';
+import { Square, X } from 'lucide-react';
 
 const statusColor = (s) => ({
   running: 'text-emerald-400 border-emerald-700',
@@ -7,7 +7,7 @@ const statusColor = (s) => ({
   completed: 'text-cyan-300 border-cyan-800'
 }[s] || 'text-slate-400 border-slate-700');
 
-export const MissionList = ({ missions, selectedId, onSelect, onAbort }) => (
+export const MissionList = ({ missions, selectedId, onSelect, onAbort, onUntrack }) => (
   <div className="rounded-lg border border-slate-800 bg-slate-900/40 p-3">
     <div className="text-xs uppercase tracking-wider text-slate-400 mb-2">Missions</div>
     {missions.length === 0 ? (
@@ -25,10 +25,14 @@ export const MissionList = ({ missions, selectedId, onSelect, onAbort }) => (
               <span className="text-[10px] text-slate-500">tick {m.tickCount}</span>
               {m.status === 'running' ? (
                 <button onClick={(e) => { e.stopPropagation(); onAbort(m.id); }}
-                  className="text-slate-500 hover:text-rose-400" title="Abort">
+                  className="text-slate-500 hover:text-rose-400" title="Abort (sends stand-down prompt to agent)">
                   <Square className="w-3 h-3" />
                 </button>
               ) : null}
+              <button onClick={(e) => { e.stopPropagation(); onUntrack(m.id); }}
+                className="text-slate-600 hover:text-slate-300" title="Untrack — remove from list without messaging the agent">
+                <X className="w-3 h-3" />
+              </button>
             </div>
             {m.spec.targetShip ? (
               <div className="text-[10px] text-cyan-400 mt-0.5 font-mono truncate">→ {m.spec.targetShip}</div>

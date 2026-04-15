@@ -321,6 +321,20 @@ export const abortMission = async (id) => {
   return { ok: true };
 };
 
+/**
+ * Silently stop tracking a mission without sending any order to the game agent.
+ * Use when the in-game task has already ended / drifted and you just want the
+ * mission row out of the companion's list.
+ */
+export const untrackMission = (id) => {
+  const mission = missions.get(id);
+  if (!mission) return { ok: false, error: 'not found' };
+  if (mission.timer) clearTimeout(mission.timer);
+  missions.delete(id);
+  logSubscribers.delete(id);
+  return { ok: true };
+};
+
 const serializeMission = (m) => ({
   id: m.id,
   spec: m.spec,

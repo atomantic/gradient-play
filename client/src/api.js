@@ -22,6 +22,7 @@ export const api = {
   mission: (id) => req('GET', `/api/missions/${id}`),
   createMission: (spec) => req('POST', '/api/missions', spec),
   abortMission: (id) => req('POST', `/api/missions/${id}/abort`),
+  untrackMission: (id) => req('DELETE', `/api/missions/${id}`),
   templates: () => req('GET', '/api/templates'),
   saveTemplate: (name, spec) => req('POST', '/api/templates', { name, spec }),
   deleteTemplate: (name) => req('DELETE', `/api/templates/${encodeURIComponent(name)}`)

@@ -1,6 +1,6 @@
 import express from 'express';
 import { connectGamePage, getGameSnapshot, sendAssistantPrompt, getConnectionStatus, loginIfNeeded, selectCharacterIfNeeded } from './cdp.js';
-import { createMission, listMissions, getMission, abortMission, subscribeMissionLog } from './missions.js';
+import { createMission, listMissions, getMission, abortMission, untrackMission, subscribeMissionLog } from './missions.js';
 import { loadMissionTemplates, saveMissionTemplate, deleteMissionTemplate } from './templates.js';
 import { credentialsStatus, setCredentials, clearCredentials } from './credentials.js';
 import { startAutopilot, stopAutopilot, getAutopilotState, subscribeAutopilotLog } from './autopilot.js';
@@ -87,6 +87,12 @@ app.post('/api/missions', async (req, res) => {
 app.post('/api/missions/:id/abort', async (req, res) => {
   const result = await abortMission(req.params.id);
   log('🛑', 'Mission abort', { id: req.params.id, ok: result.ok });
+  res.json(result);
+});
+
+app.delete('/api/missions/:id', (req, res) => {
+  const result = untrackMission(req.params.id);
+  log('🧹', 'Mission untracked', { id: req.params.id, ok: result.ok });
   res.json(result);
 });
 

@@ -1,6 +1,6 @@
 import React, { useEffect, useRef, useState } from 'react';
 import { api, streamMission } from '../api.js';
-import { Square } from 'lucide-react';
+import { Square, X } from 'lucide-react';
 
 const entryColor = (type) => ({
   kickoff: 'text-cyan-300',
@@ -30,7 +30,7 @@ const formatEntry = (e) => {
   return JSON.stringify(e);
 };
 
-export const MissionDetail = ({ missionId, onAbort }) => {
+export const MissionDetail = ({ missionId, onAbort, onUntrack }) => {
   const [mission, setMission] = useState(null);
   const [entries, setEntries] = useState([]);
   const scrollRef = useRef(null);
@@ -74,14 +74,22 @@ export const MissionDetail = ({ missionId, onAbort }) => {
           <div className="text-xs text-slate-500">mission</div>
           <div className="text-sm text-slate-100 font-mono">{missionId.slice(0, 8)}…</div>
         </div>
-        {mission?.status === 'running' ? (
-          <button onClick={() => onAbort(missionId)}
-            className="px-2 py-1 rounded border border-rose-800 hover:border-rose-500 text-rose-300 text-xs flex items-center gap-1">
-            <Square className="w-3 h-3" /> Abort
+        <div className="flex items-center gap-1">
+          {mission?.status === 'running' ? (
+            <button onClick={() => onAbort(missionId)}
+              className="px-2 py-1 rounded border border-rose-800 hover:border-rose-500 text-rose-300 text-xs flex items-center gap-1"
+              title="Sends a stand-down prompt to the game agent, then stops tracking">
+              <Square className="w-3 h-3" /> Abort
+            </button>
+          ) : (
+            <span className="text-xs text-slate-500 mr-2">{mission?.status}</span>
+          )}
+          <button onClick={() => onUntrack(missionId)}
+            className="px-2 py-1 rounded border border-slate-700 hover:border-slate-500 text-slate-400 text-xs flex items-center gap-1"
+            title="Remove from tracking without messaging the game agent">
+            <X className="w-3 h-3" /> Untrack
           </button>
-        ) : (
-          <span className="text-xs text-slate-500">{mission?.status}</span>
-        )}
+        </div>
       </div>
       {mission?.spec?.goal ? (
         <div className="text-xs text-slate-300 mb-2 whitespace-pre-wrap">{mission.spec.goal}</div>
