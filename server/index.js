@@ -22,7 +22,7 @@ import { connectGamePage, getGameSnapshot, sendAssistantPrompt, getConnectionSta
 import { createMission, listMissions, getMission, abortMission, untrackMission, subscribeMissionLog } from './missions.js';
 import { loadMissionTemplates, saveMissionTemplate, deleteMissionTemplate } from './templates.js';
 import { credentialsStatus, setCredentials, clearCredentials } from './credentials.js';
-import { startAutopilot, stopAutopilot, getAutopilotState, subscribeAutopilotLog, startFleetRally } from './autopilot.js';
+import { startAutopilot, stopAutopilot, getAutopilotState, subscribeAutopilotLog, startFleetRally, fireRallyStep } from './autopilot.js';
 import { getIntel, addManualEvent, updateEvent as updateIntelEvent, deleteEvent, clearIntel, observe as intelObserve } from './intel.js';
 
 const PORT = Number(process.env.PORT || 5572);
@@ -206,6 +206,15 @@ app.post('/api/fleet/rally', async (req, res) => {
   log('🏁', 'Fleet rally requested');
   const result = await startFleetRally(req.body || {});
   log(result.ok ? '✅' : '⚠️', `Fleet rally ${result.ok ? 'started' : 'failed'}`, { error: result.error, shipCount: result.shipCount });
+  res.json(result);
+});
+
+app.post('/api/fleet/step', async (req, res) => {
+  const { step } = req.body || {};
+  if (!step) return res.status(400).json({ ok: false, error: 'step required' });
+  log('⚡', `Fleet step: ${step}`);
+  const result = await fireRallyStep(step);
+  log(result.ok ? '✅' : '⚠️', `Fleet step ${step} ${result.ok ? 'fired' : 'failed'}`, { error: result.error });
   res.json(result);
 });
 

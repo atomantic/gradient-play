@@ -1,5 +1,14 @@
 import React, { useRef, useState } from 'react';
-import { Fuel, Flag } from 'lucide-react';
+import { Fuel, MapPin, Banknote, Zap, Scale, Briefcase, Rocket, Home } from 'lucide-react';
+
+const STEPS = [
+  { name: 'fuel-share',         label: 'Fuel Share',      icon: Fuel,      hint: 'transfer_warp between ships until everyone has enough to move' },
+  { name: 'rally',              label: 'Rally to Hub',    icon: MapPin,    hint: 'plot_course every ship to the home hub and dock' },
+  { name: 'fund-for-recharge',  label: 'Fund Ships',      icon: Banknote,  hint: 'primary transfers credits to any ship below 1000' },
+  { name: 'recharge',           label: 'Recharge',        icon: Zap,       hint: 'recharge_warp_power on every ship to full' },
+  { name: 'credit-balance',     label: 'Balance Credits', icon: Scale,     hint: 'even out credits at the configured floor, primary banks excess' },
+  { name: 'resume',             label: 'Dispatch Roles',  icon: Briefcase, hint: 'send every ship back to its role-appropriate task' }
+];
 
 export const FleetActions = () => {
   const [busy, setBusy] = useState(null);
@@ -17,47 +26,74 @@ export const FleetActions = () => {
     pendingTimer.current = setTimeout(() => setPending(null), 5000);
   };
 
-  const doAction = async (action, url) => {
-    if (pending !== action) { armPending(action); return; }
-    clearPending();
+  const post = async (action, url, body) => {
     setBusy(action);
     setMsg('sending…');
-    const r = await fetch(url, { method: 'POST' }).then((r) => r.json()).catch((e) => ({ ok: false, error: e.message }));
+    const r = await fetch(url, {
+      method: 'POST',
+      headers: body ? { 'Content-Type': 'application/json' } : {},
+      body: body ? JSON.stringify(body) : undefined
+    }).then((r) => r.json()).catch((e) => ({ ok: false, error: e.message }));
     setBusy(null);
-    setMsg(r.ok
-      ? `${action} started — ${r.shipCount ?? '?'} ships`
-      : `failed: ${r.error || 'unknown'}`);
-    setTimeout(() => setMsg(null), 8000);
+    setMsg(r.ok ? `${action} sent` : `failed: ${r.error || 'unknown'}`);
+    setTimeout(() => setMsg(null), 6000);
   };
 
-  const btnClass = (action, base) =>
+  const fireStep = (name) => post(name, '/api/fleet/step', { step: name });
+
+  const confirmAction = async (action, url, body) => {
+    if (pending !== action) { armPending(action); return; }
+    clearPending();
+    await post(action, url, body);
+  };
+
+  const stepBtn = (s) => {
+    const Icon = s.icon;
+    return (
+      <button key={s.name}
+        onClick={() => fireStep(s.name)}
+        disabled={busy != null}
+        title={s.hint}
+        className="px-3 py-2 rounded text-white text-sm flex items-center gap-2 bg-slate-700 hover:bg-slate-600 disabled:bg-slate-800 disabled:text-slate-500">
+        <Icon className="w-4 h-4" />
+        {busy === s.name ? 'sending…' : s.label}
+      </button>
+    );
+  };
+
+  const bigBtnClass = (action, base) =>
     `w-full px-3 py-2 rounded text-white text-sm flex items-center justify-center gap-2 disabled:bg-slate-700 ${
       pending === action ? 'bg-amber-600 hover:bg-amber-500' : base
     }`;
 
   return (
-    <div className="rounded-lg border border-slate-800 bg-slate-900/40 p-3 space-y-2">
+    <div className="rounded-lg border border-slate-800 bg-slate-900/40 p-3 space-y-3">
       <div className="text-xs uppercase tracking-wider text-slate-400">Fleet actions</div>
 
-      <button onClick={() => doAction('recall', '/api/fleet/recall-refuel')}
+      <div className="grid grid-cols-2 gap-2">
+        {STEPS.map(stepBtn)}
+      </div>
+
+      <div className="pt-1 border-t border-slate-800" />
+
+      <button onClick={() => confirmAction('everything', '/api/fleet/rally', { resume: true })}
         disabled={busy != null}
-        className={btnClass('recall', 'bg-slate-700 hover:bg-slate-600')}>
-        <Fuel className="w-4 h-4" />
-        {busy === 'recall' ? 'sending…' : pending === 'recall' ? 'Confirm recall?' : 'Quick recall & refuel'}
+        className={bigBtnClass('everything', 'bg-cyan-700 hover:bg-cyan-600')}>
+        <Rocket className="w-4 h-4" />
+        {busy === 'everything' ? 'sending…' : pending === 'everything' ? 'Confirm run everything?' : 'Everything (full rally + dispatch)'}
       </button>
 
-      <button onClick={() => doAction('rally', '/api/fleet/rally')}
+      <button onClick={() => confirmAction('home-base', '/api/fleet/rally', { resume: false })}
         disabled={busy != null}
-        className={btnClass('rally', 'bg-cyan-700 hover:bg-cyan-600')}>
-        <Flag className="w-4 h-4" />
-        {busy === 'rally' ? 'sending…' : pending === 'rally' ? 'Confirm rally?' : 'Rally, refuel & bank'}
+        className={bigBtnClass('home-base', 'bg-amber-700 hover:bg-amber-600')}>
+        <Home className="w-4 h-4" />
+        {busy === 'home-base' ? 'sending…' : pending === 'home-base' ? 'Confirm park at hub?' : 'Everything but Dispatch (park at hub)'}
       </button>
 
       {msg ? <div className="text-[11px] text-slate-400">{msg}</div> : null}
       <div className="text-[10px] text-slate-500">
-        <strong>Quick recall:</strong> one-shot prompt — everyone to a megaport.<br/>
-        <strong>Rally:</strong> coordinated 5-step plan — fuel-share → converge →
-        recharge → sweep credits → resume. Runs through autopilot plan queue.
+        Step buttons fire a single prompt and stop — no plan, no nag. Run them in any order you like.
+        The two big buttons chain all steps as a managed plan (double-click to confirm).
       </div>
     </div>
   );

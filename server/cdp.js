@@ -320,7 +320,8 @@ export const clickGameReconnect = async () => {
 };
 
 const SEND_THROTTLE_MS = 2100;
-let lastSendAt = 0;
+let lastSendEndedAt = 0;
+let sendChain = Promise.resolve();
 
 const findAssistantInput = async (page) => {
   const candidates = [
@@ -339,20 +340,28 @@ const findAssistantInput = async (page) => {
   return null;
 };
 
+// Serialize typing into the chat input. A long prompt types for ~3s
+// (~500 chars × 6ms); without this queue, concurrent callers interleave
+// characters into the same <input>, producing scrambled messages.
 export const sendAssistantPrompt = async (text) => {
-  const page = await withPage();
-  const now = Date.now();
-  const wait = lastSendAt + SEND_THROTTLE_MS - now;
-  if (wait > 0) await new Promise((r) => setTimeout(r, wait));
-
-  const input = await findAssistantInput(page);
-  if (!input) return { ok: false, error: 'chat input not found' };
-  await input.loc.click();
-  await input.loc.fill('');
-  await input.loc.type(text, { delay: 6 });
-  await input.loc.press('Enter');
-  lastSendAt = Date.now();
-  return { ok: true, via: 'enter', inputSelector: input.sel };
+  const task = sendChain.then(async () => {
+    const page = await withPage();
+    const wait = lastSendEndedAt + SEND_THROTTLE_MS - Date.now();
+    if (wait > 0) await new Promise((r) => setTimeout(r, wait));
+    const input = await findAssistantInput(page);
+    if (!input) {
+      lastSendEndedAt = Date.now();
+      return { ok: false, error: 'chat input not found' };
+    }
+    await input.loc.click();
+    await input.loc.fill('');
+    await input.loc.type(text, { delay: 6 });
+    await input.loc.press('Enter');
+    lastSendEndedAt = Date.now();
+    return { ok: true, via: 'enter', inputSelector: input.sel };
+  });
+  sendChain = task.catch(() => {});
+  return task;
 };
 
 /**

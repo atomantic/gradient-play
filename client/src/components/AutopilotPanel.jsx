@@ -9,6 +9,8 @@ const DEFAULT_CONFIG = {
   rescueCooldownSec: 90,
   safeMode: true,
   maxDecisionsPerTick: 2,
+  homeHub: 1413,
+  dispatchMinWarp: 200,
   onHandFloor: 1000,
   depositExcessOver: 4000,
   decisionCooldownSec: 420,
@@ -197,9 +199,21 @@ export const AutopilotPanel = () => {
                 className="bg-slate-950 border border-slate-800 rounded px-1 py-0.5 w-16" /> s
             </label>
             <label className="flex items-center gap-1">
+              <span className="text-slate-400 w-24">Home hub</span>
+              <input type="number" min={0} value={config.homeHub ?? 305}
+                onChange={(e) => setConfig({ ...config, homeHub: Number(e.target.value) })}
+                className="bg-slate-950 border border-slate-800 rounded px-1 py-0.5 w-16" />
+            </label>
+            <label className="flex items-center gap-1">
               <span className="text-slate-400 w-24">Min warp</span>
               <input type="number" min={0} value={config.minWarp}
                 onChange={(e) => setConfig({ ...config, minWarp: Number(e.target.value) })}
+                className="bg-slate-950 border border-slate-800 rounded px-1 py-0.5 w-16" />
+            </label>
+            <label className="flex items-center gap-1">
+              <span className="text-slate-400 w-24">Dispatch min</span>
+              <input type="number" min={0} value={config.dispatchMinWarp ?? 200}
+                onChange={(e) => setConfig({ ...config, dispatchMinWarp: Number(e.target.value) })}
                 className="bg-slate-950 border border-slate-800 rounded px-1 py-0.5 w-16" />
             </label>
             <label className="flex items-center gap-1">

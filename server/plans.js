@@ -155,16 +155,18 @@ const MIN_WARP_TO_MOVE = 20;
  *   4. credit-sweep → transfer excess credits to primary, primary bank_deposits
  *   5. resume      → put every ship back on its role-appropriate task
  */
-export const buildFleetRallyPlan = (ships = [], { keepCredits = 1000, megaports = [305, 472, 1413] } = {}) => {
+export const buildFleetRallyPlan = (ships = [], { keepCredits = 1000, megaports = [305, 472, 1413], homeHub = 305, resume = true } = {}) => {
   const names = ships.map((s) => s.name).filter(Boolean);
   const fleetLabel = names.length ? names.join(', ') : 'every ship';
+  const primary = ships.find((s) => s.primary);
+  const primaryName = primary?.name || 'the primary ship';
 
   const steps = [];
 
   // Step 1: fuel-share
   steps.push({
     name: 'fuel-share',
-    prompt: `fleet rally step 1 — fuel share. check all corp ships (${fleetLabel}). any ship with warp < ${MIN_WARP_TO_MOVE} is stranded. for each stranded ship, find the nearest corpmate with spare warp and use transfer_warp_power to give it at least ${MIN_WARP_TO_MOVE * 3} warp so it can reach a megaport. do this interactively — do NOT start autonomous tasks.`,
+    prompt: `fuel share. check EVERY ship (${fleetLabel}), including the primary ${primaryName}. any ship with warp < ${MIN_WARP_TO_MOVE} is stranded. for each stranded ship, find the nearest fleetmate with spare warp and use transfer_warp_power to give it at least ${MIN_WARP_TO_MOVE * 3} warp so it can reach a megaport. do this interactively — do NOT start autonomous tasks.`,
     nagMs: 120_000,
     maxMs: 6 * 60_000,
     isDone: (snap) => {
@@ -173,31 +175,39 @@ export const buildFleetRallyPlan = (ships = [], { keepCredits = 1000, megaports 
     }
   });
 
-  // Step 2: rally
+  // Step 2: rally — everyone MUST meet at the home hub specifically, not
+  // just any shared sector. This guarantees transfer_credits/bank_deposit
+  // coordination later.
   steps.push({
     name: 'rally',
-    prompt: `fleet rally step 2 — converge. route ALL ships (${fleetLabel}) to the nearest mega-port (${megaports.join('/')} — pick whichever most of the fleet can reach cheaply). use plot_course for each. don't start trade or explore tasks — just move everyone to the SAME megaport and dock.`,
+    prompt: `converge at home hub ${homeHub}. route EVERY ship to sector ${homeHub} and dock — this includes the primary ${primaryName}, do NOT skip it. full fleet: ${fleetLabel}. call plot_course directly for each ship (interactive). do NOT use start_task — no trade/explore tasks, just move every ship to ${homeHub} and dock.`,
     nagMs: 150_000,
     maxMs: 8 * 60_000,
-    // "Everyone docked at the same sector" is hard to verify from DOM alone
-    // (we don't know megaport sector IDs). Heuristic: all non-primary ships
-    // are idle and share a sector with the primary.
     isDone: (snap) => {
       const all = snap?.extracted?.ships || [];
       if (all.length < 2) return false;
-      const primary = all.find((s) => s.primary);
-      if (!primary?.sector) return false;
-      return all.every((s) => s.sector === primary.sector && s.active === false);
+      return all.every((s) => s.sector === homeHub && s.active === false);
     }
   });
 
   // Step 3: fund ships for recharge
-  // Recharging warp costs credits. Ships that are broke need a credit transfer
-  // from the primary before they can recharge. Since everyone is docked at the
-  // same megaport, transfer_credits works directly.
+  // The game assistant can't query corp-ship credits directly — it only sees
+  // its own context. We scraped the balances from the DOM, so we bake the
+  // per-ship transfer amounts into the prompt.
+  const corpShips = ships.filter((s) => !s.primary);
+  const fundNeeded = corpShips
+    .filter((s) => s.credits != null && s.credits < 1000)
+    .map((s) => `${s.name}: has ${s.credits}, transfer ${1000 - s.credits}`);
+  const fundUnknown = corpShips.filter((s) => s.credits == null).map((s) => s.name);
+  const fundLines = [];
+  if (fundNeeded.length) fundLines.push(fundNeeded.join('; '));
+  if (fundUnknown.length) fundLines.push(`unknown balances (top up to 1000 blindly, we'll sweep back later): ${fundUnknown.join(', ')}`);
+  const fundBody = fundLines.length
+    ? fundLines.join('. ')
+    : 'all corp ships already have ≥ 1000 credits — nothing to do';
   steps.push({
     name: 'fund-for-recharge',
-    prompt: `fleet rally step 3 — fund ships. all ships are at the same megaport. check each corp ship's credits. if any ship has < 1000 credits, have the primary withdraw from bank (if needed) and transfer_credits 1000 to that ship so it can afford recharge_warp_power. interactive only — no new tasks.`,
+    prompt: `fund ships. ${primaryName} is at hub ${homeHub} with the corp ships. ${fundBody}. ${primaryName} withdraws from bank first if on-hand is short. use transfer_credits for each. interactive only — no new tasks.`,
     nagMs: 90_000,
     maxMs: 4 * 60_000,
     isDone: (snap) => {
@@ -209,7 +219,7 @@ export const buildFleetRallyPlan = (ships = [], { keepCredits = 1000, megaports 
   // Step 4: recharge
   steps.push({
     name: 'recharge',
-    prompt: `fleet rally step 4 — recharge. all ships are funded and docked. recharge_warp_power on every ship (${fleetLabel}) to full. do this interactively for each one.`,
+    prompt: `recharge. all ships are funded and docked at ${homeHub}. recharge_warp_power on every ship to full, including the primary ${primaryName}. full fleet: ${fleetLabel}. do this interactively for each one.`,
     nagMs: 90_000,
     maxMs: 5 * 60_000,
     isDone: (snap) => {
@@ -222,29 +232,39 @@ export const buildFleetRallyPlan = (ships = [], { keepCredits = 1000, megaports 
     }
   });
 
-  // Step 5: credit sweep
-  // Probes don't trade — they have no use for credits after refueling, so they
-  // sweep their balance to ZERO. Haulers and other trade ships keep a working
-  // float so they can buy/sell on their next loop.
+  // Step 5: credit balance
+  // Every corp ship should end with exactly ${keepCredits} on hand — top up
+  // from primary if below, sweep excess to primary if above. Primary banks
+  // everything above its own ${keepCredits} float. Uniform policy: all ships
+  // get the same working capital. Balances baked in because the assistant
+  // can't query them directly.
+  const balanceLines = corpShips.map((s) => {
+    if (s.credits == null) return `${s.name}: balance unknown — ask it to report credits, then top-up or sweep to ${keepCredits}`;
+    const diff = s.credits - keepCredits;
+    if (diff > 0) return `${s.name}: has ${s.credits}, transfer ${diff} to ${primaryName}`;
+    if (diff < 0) return `${s.name}: has ${s.credits}, ${primaryName} transfers ${-diff} to it`;
+    return `${s.name}: already at ${keepCredits}`;
+  });
   steps.push({
-    name: 'credit-sweep',
-    prompt: `fleet rally step 5 — bank all credits. everyone is docked together. for each PROBE, transfer_credits ALL credits (down to 0) to the primary — probes don't trade, they don't need a float. for each HAULER / other ship, transfer everything above ${keepCredits}. once the primary has collected all excess, bank_deposit everything above ${keepCredits}. interactive only.`,
+    name: 'credit-balance',
+    prompt: `balance credits at ${keepCredits} each. everyone is docked at hub ${homeHub}. ${balanceLines.join('; ')}. ${primaryName} withdraws from bank if on-hand too low for the top-ups. once every corp ship is at ${keepCredits}, ${primaryName} bank_deposits everything above its own ${keepCredits} float. interactive only — no new tasks.`,
     nagMs: 90_000,
     maxMs: 4 * 60_000,
     isDone: (snap) => {
       const all = snap?.extracted?.ships || [];
       const corpShips = all.filter((s) => !s.primary && s.credits != null);
       return corpShips.every((s) => {
-        const isP = /PROBE/i.test(s.name || '');
-        return isP ? s.credits <= 50 : s.credits <= keepCredits + 200;
+        // Allow a small tolerance band around keepCredits — recharge costs
+        // between transfer and isDone may leave ships slightly off.
+        return s.credits >= keepCredits - 100 && s.credits <= keepCredits + 200;
       });
     }
   });
 
-  // Step 6: resume
-  steps.push({
+  // Step 6: resume (optional — skip for "Home Base" which parks the fleet)
+  if (resume) steps.push({
     name: 'resume',
-    prompt: `fleet rally complete — all ships fueled, credits banked. resume normal operations: put each ship back on its role-appropriate task. haulers on short fedspace NS trade loops, probes on explore/salvage (or their named role — refueler stays parked, explorer maps, scavenger salvages). primary on a fedspace trade loop.`,
+    prompt: `dispatch roles. put each ship back on its role-appropriate task. haulers on short fedspace NS trade loops, probes on explore/salvage (or their named role — refueler stays parked, explorer maps, scavenger salvages). primary on a fedspace trade loop.`,
     nagMs: 120_000,
     maxMs: 5 * 60_000,
     isDone: (snap) => {
