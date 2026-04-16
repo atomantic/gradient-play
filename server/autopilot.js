@@ -442,7 +442,11 @@ const decide = (snapshot) => {
   // Pick the most-fueled corp ship with enough warp to reach the primary
   // (conservative threshold: 2× criticalWarp + a 100-warp buffer), dispatch
   // it to transfer_warp_power to primary, then primary heads to hub.
-  if (cfg.enabled.refuel && primaryShip && primaryShip.warpPower != null
+  //
+  // CEO-only. A non-CEO autopilot shouldn't direct corp ships (shared task
+  // slots would trample another corp member's commands). When non-CEO the
+  // user must coordinate the rescue manually from the in-game chat.
+  if (ceo && cfg.enabled.refuel && primaryShip && primaryShip.warpPower != null
       && primaryShip.warpPower < cfg.fuelCriticalWarp
       && !hasPlan(primaryShip.name)) {
     const MIN_SAVIOR_WARP = Math.max(200, cfg.fuelCriticalWarp * 2 + 100);
