@@ -3,7 +3,7 @@ import { connectGamePage, getGameSnapshot, sendAssistantPrompt, getConnectionSta
 import { createMission, listMissions, getMission, abortMission, untrackMission, subscribeMissionLog } from './missions.js';
 import { loadMissionTemplates, saveMissionTemplate, deleteMissionTemplate } from './templates.js';
 import { credentialsStatus, setCredentials, clearCredentials } from './credentials.js';
-import { startAutopilot, stopAutopilot, getAutopilotState, subscribeAutopilotLog } from './autopilot.js';
+import { startAutopilot, stopAutopilot, getAutopilotState, subscribeAutopilotLog, startFleetRally } from './autopilot.js';
 import { getIntel, addManualEvent, updateEvent as updateIntelEvent, deleteEvent, clearIntel, observe as intelObserve } from './intel.js';
 
 const PORT = Number(process.env.PORT || 5570);
@@ -46,6 +46,15 @@ app.post('/api/assistant/prompt', async (req, res) => {
   log('💬', 'Direct prompt sent', { len: text.length });
   const result = await sendAssistantPrompt(text);
   res.json(result);
+});
+
+app.post('/api/fleet/rename-ship', async (req, res) => {
+  const { ship, newName } = req.body || {};
+  if (!ship || !newName) return res.status(400).json({ ok: false, error: 'ship and newName required' });
+  const text = `rename the corp ship "${ship}" to "${newName}" — call the rename_ship tool (or equivalent) right now. one action, no planning, no follow-up tasks. just the rename.`;
+  log('🏷️', 'Rename ship', { ship, newName });
+  const result = await sendAssistantPrompt(text);
+  res.json({ ok: !!result.ok, ship, newName, send: result });
 });
 
 app.post('/api/fleet/recall-refuel', async (_req, res) => {
@@ -172,6 +181,13 @@ app.post('/api/intel/scan', async (_req, res) => {
   const snap = await (await import('./cdp.js')).getGameSnapshot();
   const added = intelObserve(snap);
   res.json({ ok: true, added });
+});
+
+app.post('/api/fleet/rally', async (req, res) => {
+  log('🏁', 'Fleet rally requested');
+  const result = await startFleetRally(req.body || {});
+  log(result.ok ? '✅' : '⚠️', `Fleet rally ${result.ok ? 'started' : 'failed'}`, { error: result.error, shipCount: result.shipCount });
+  res.json(result);
 });
 
 app.post('/api/autopilot/start', (req, res) => {

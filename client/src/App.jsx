@@ -7,9 +7,12 @@ import { MissionList } from './components/MissionList.jsx';
 import { MissionDetail } from './components/MissionDetail.jsx';
 import { DirectChat } from './components/DirectChat.jsx';
 import { FleetActions } from './components/FleetActions.jsx';
+import { ShipRoles } from './components/ShipRoles.jsx';
 import { CredentialsPanel } from './components/CredentialsPanel.jsx';
 import { AutopilotPanel } from './components/AutopilotPanel.jsx';
 import { IntelPanel } from './components/IntelPanel.jsx';
+
+const RECONNECT_THROTTLE_MS = 15_000;
 
 export default function App() {
   const [status, setStatus] = useState(null);
@@ -19,6 +22,7 @@ export default function App() {
   const [templates, setTemplates] = useState([]);
   const [error, setError] = useState(null);
   const [rightTab, setRightTab] = useState('mission'); // 'mission' | 'autopilot' | 'intel'
+  const lastReconnectAt = React.useRef(0);
 
   const refresh = async () => {
     try {
@@ -33,6 +37,10 @@ export default function App() {
       setMissions(ml.missions || []);
       setTemplates(t.templates || []);
       setError(null);
+      if (s && !s.connected && Date.now() - lastReconnectAt.current > RECONNECT_THROTTLE_MS) {
+        lastReconnectAt.current = Date.now();
+        api.connect().catch(() => { /* will retry on next tick */ });
+      }
     } catch (e) {
       setError(e.message);
     }
@@ -90,6 +98,7 @@ export default function App() {
         <aside className="col-span-12 lg:col-span-3 space-y-4">
           <HUD snapshot={snapshot} />
           <FleetActions />
+          <ShipRoles ships={snapshot?.extracted?.ships || []} />
           <CredentialsPanel />
           <DirectChat />
         </aside>

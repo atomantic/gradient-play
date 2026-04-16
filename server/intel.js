@@ -23,8 +23,20 @@ const emptyStore = () => ({ events: [], seenShips: {}, updatedAt: null });
 
 const load = () => {
   if (!fs.existsSync(FILE)) return emptyStore();
-  try { return JSON.parse(fs.readFileSync(FILE, 'utf8')); }
+  let parsed;
+  try { parsed = JSON.parse(fs.readFileSync(FILE, 'utf8')); }
   catch { return emptyStore(); }
+  // Cleanup: "vanished" was a DOM-diff heuristic that fires false positives on
+  // every disconnect (all ships disappear at once). Strip any existing records
+  // so the threat log reflects real destructions only.
+  if (Array.isArray(parsed.events)) {
+    const before = parsed.events.length;
+    parsed.events = parsed.events.filter((e) => e.type !== 'vanished');
+    if (parsed.events.length !== before) {
+      console.log(`🧹 intel: removed ${before - parsed.events.length} stale 'vanished' events on load`);
+    }
+  }
+  return parsed;
 };
 
 const save = (store) => {
@@ -34,6 +46,8 @@ const save = (store) => {
 };
 
 let store = load();
+// Persist any cleanup from load() immediately.
+if (store.events?.length != null) save(store);
 
 const addEvent = (ev) => {
   const stamped = { id: randomUUID(), ts: ev.ts || Date.now(), source: 'manual', ...ev };
@@ -150,10 +164,7 @@ export const observe = (snapshot) => {
     }));
   }
 
-  // DOM-based: ships marked DESTROYED, and ships that disappeared from the fleet.
-  const currentByName = new Map();
-  for (const s of ex.ships || []) currentByName.set(s.name, s);
-
+  // DOM-based: ships marked DESTROYED in the fleet panel.
   // New destroyed flag transitions.
   for (const s of ex.ships || []) {
     const prev = store.seenShips[s.name];
@@ -175,21 +186,10 @@ export const observe = (snapshot) => {
     };
   }
 
-  // Vanished: previously seen alive, no longer present at all (probe was killed).
-  for (const [name, prev] of Object.entries(store.seenShips)) {
-    if (!currentByName.has(name) && !prev.destroyed && prev.lastSeen &&
-        Date.now() - prev.lastSeen < 5 * 60_000) {
-      // Only fire once — mark destroyed so we don't re-fire.
-      added.push(addEvent({
-        type: 'vanished',
-        source: 'dom',
-        ship: name,
-        sector: prev.sector ?? null,
-        note: 'Ship no longer in fleet panel'
-      }));
-      store.seenShips[name] = { ...prev, destroyed: true };
-    }
-  }
+  // (Previously: DOM-diff "vanished" detection. Removed — it fires every time
+  // the CDP or game connection drops and the fleet panel re-renders empty,
+  // which produced a flood of false-positive threat events. Real destructions
+  // come from the DESTROYED flag transition above and the destroyedShips table.)
   save(store);
 
   // Chat-based: parse timestamped assistant messages.

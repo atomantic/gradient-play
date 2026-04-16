@@ -4,8 +4,13 @@ import { Bot, Play, Square, Settings } from 'lucide-react';
 const DEFAULT_CONFIG = {
   pollIntervalSec: 60,
   minWarp: 50,
-  onHandFloor: 5000,
-  depositExcessOver: 3000,
+  fuelCriticalWarp: 15,
+  refuelCooldownSec: 180,
+  rescueCooldownSec: 90,
+  safeMode: true,
+  maxDecisionsPerTick: 2,
+  onHandFloor: 1000,
+  depositExcessOver: 4000,
   decisionCooldownSec: 420,
   exploreMaxHops: 40,
   considerUpgrades: true,
@@ -18,6 +23,7 @@ const DEFAULT_CONFIG = {
 const entryColor = (type) => ({
   decision: 'text-cyan-300',
   event: 'text-amber-300',
+  plan: 'text-violet-300',
   tick: 'text-slate-500',
   start: 'text-emerald-400',
   stop: 'text-amber-400',
@@ -31,7 +37,17 @@ const formatEntry = (e) => {
     const running = s.tasksRunning ?? 0;
     const ships = (s.ships || []).map((sh) => `${sh.name.split(' ').pop()}:${sh.warp ?? '-'}${sh.active ? '●' : '○'}`).join(' ');
     const cap = e.capped ? ` corpTasks=${s.corpActive}/${s.corpTaskCap} CAPPED` : (s.corpActive != null ? ` corp=${s.corpActive}/${s.corpTaskCap}` : '');
-    return `poll  tasks=${running}${cap}  bank=${s.creditsBank}  hand=${s.creditsOnHand}  [${ships}]  decisions=${e.decisionCount}`;
+    const slots = s.taskSlots ? ` slots=${s.taskSlots}` : '';
+    return `poll  tasks=${running}${slots}${cap}  bank=${s.creditsBank}  hand=${s.creditsOnHand}  [${ships}]  decisions=${e.decisionCount}`;
+  }
+  if (e.type === 'plan') {
+    const tag = e.shipName ? `[${e.shipName.split(' ').pop()}] ` : '';
+    if (e.event === 'create') return `${tag}plan:${e.goal} created (${e.stepCount} steps) → ${e.step}`;
+    if (e.event === 'advance') return `${tag}plan:${e.goal} advance from "${e.fromStep}" (${e.reason})`;
+    if (e.event === 'complete') return `${tag}plan:${e.goal} complete`;
+    if (e.event === 'prompt') return `${tag}plan:${e.goal} → ${e.step}: ${e.text}`;
+    if (e.event === 'nag') return `${tag}plan:${e.goal} nag "${e.step}"`;
+    return `${tag}plan:${e.goal} ${e.event}`;
   }
   if (e.type === 'decision') return (e.ship ? `[${e.ship.split(' ').pop()}] ` : '') + e.text;
   if (e.type === 'event' && e.intelType) return `[${e.ship?.split(' ').pop() || '?'}] intel: ${e.intelType}${e.attacker ? ' by ' + e.attacker : ''}${e.sector ? ' @' + e.sector : ''}`;
@@ -43,22 +59,58 @@ const formatEntry = (e) => {
   return JSON.stringify(e);
 };
 
+const STORAGE_ENABLED = 'autopilot.enabled';
+const STORAGE_CONFIG = 'autopilot.config';
+
+const loadStoredConfig = () => {
+  const raw = localStorage.getItem(STORAGE_CONFIG);
+  if (!raw) return DEFAULT_CONFIG;
+  const parsed = JSON.parse(raw);
+  return { ...DEFAULT_CONFIG, ...parsed, enabled: { ...DEFAULT_CONFIG.enabled, ...(parsed.enabled || {}) } };
+};
+
 export const AutopilotPanel = () => {
   const [state, setState] = useState(null);
-  const [config, setConfig] = useState(DEFAULT_CONFIG);
+  const [config, setConfig] = useState(loadStoredConfig);
   const [showConfig, setShowConfig] = useState(false);
   const [entries, setEntries] = useState([]);
   const scrollRef = useRef(null);
+  const autoStartTriedRef = useRef(false);
+  const lastAutoStartAtRef = useRef(0);
 
   const refresh = async () => {
     const s = await fetch('/api/autopilot').then((r) => r.json());
     setState(s);
     if (s.config) setConfig({ ...DEFAULT_CONFIG, ...s.config, enabled: { ...DEFAULT_CONFIG.enabled, ...(s.config.enabled || {}) } });
     if (s.log) setEntries(s.log);
+    return s;
+  };
+
+  // If localStorage says autopilot should be running but server says it isn't,
+  // restart it. Throttled so we don't hammer the server when something keeps
+  // failing.
+  const maybeAutoStart = async (serverState) => {
+    if (localStorage.getItem(STORAGE_ENABLED) !== 'true') return;
+    if (serverState?.running) return;
+    if (Date.now() - lastAutoStartAtRef.current < 20_000) return;
+    lastAutoStartAtRef.current = Date.now();
+    const cfg = loadStoredConfig();
+    await fetch('/api/autopilot/start', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(cfg)
+    }).catch(() => { /* will retry */ });
+    await refresh();
   };
 
   useEffect(() => {
-    refresh();
+    (async () => {
+      const s = await refresh();
+      if (!autoStartTriedRef.current) {
+        autoStartTriedRef.current = true;
+        await maybeAutoStart(s);
+      }
+    })();
     const es = new EventSource('/api/autopilot/stream');
     es.addEventListener('snapshot', (e) => {
       const s = JSON.parse(e.data);
@@ -66,9 +118,11 @@ export const AutopilotPanel = () => {
     });
     es.addEventListener('log', (e) => {
       setEntries((prev) => [...prev, JSON.parse(e.data)].slice(-400));
-      // also refresh state summary periodically via log events
     });
-    const poll = setInterval(refresh, 10_000);
+    const poll = setInterval(async () => {
+      const s = await refresh();
+      maybeAutoStart(s);
+    }, 10_000);
     return () => { es.close(); clearInterval(poll); };
   }, []);
 
@@ -77,6 +131,9 @@ export const AutopilotPanel = () => {
   }, [entries]);
 
   const start = async () => {
+    localStorage.setItem(STORAGE_ENABLED, 'true');
+    localStorage.setItem(STORAGE_CONFIG, JSON.stringify(config));
+    lastAutoStartAtRef.current = Date.now();
     await fetch('/api/autopilot/start', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -86,6 +143,7 @@ export const AutopilotPanel = () => {
   };
 
   const stop = async () => {
+    localStorage.setItem(STORAGE_ENABLED, 'false');
     await fetch('/api/autopilot/stop', { method: 'POST' });
     await refresh();
   };
@@ -145,6 +203,12 @@ export const AutopilotPanel = () => {
                 className="bg-slate-950 border border-slate-800 rounded px-1 py-0.5 w-16" />
             </label>
             <label className="flex items-center gap-1">
+              <span className="text-slate-400 w-24">Rescue at</span>
+              <input type="number" min={0} value={config.fuelCriticalWarp}
+                onChange={(e) => setConfig({ ...config, fuelCriticalWarp: Number(e.target.value) })}
+                className="bg-slate-950 border border-slate-800 rounded px-1 py-0.5 w-16" />
+            </label>
+            <label className="flex items-center gap-1">
               <span className="text-slate-400 w-24">On-hand floor</span>
               <input type="number" min={0} value={config.onHandFloor}
                 onChange={(e) => setConfig({ ...config, onHandFloor: Number(e.target.value) })}
@@ -170,6 +234,11 @@ export const AutopilotPanel = () => {
             </label>
           </div>
           <div className="flex flex-wrap gap-x-3 gap-y-1 pt-1">
+            <label className="flex items-center gap-1 text-amber-300 font-semibold">
+              <input type="checkbox" checked={config.safeMode ?? true}
+                onChange={(e) => setConfig({ ...config, safeMode: e.target.checked })} />
+              safe mode
+            </label>
             {Object.keys(config.enabled).map((k) => (
               <label key={k} className="flex items-center gap-1 text-slate-400">
                 <input type="checkbox" checked={config.enabled[k]}
@@ -178,9 +247,35 @@ export const AutopilotPanel = () => {
               </label>
             ))}
           </div>
+          <div className="text-[10px] text-amber-400/70 -mt-0.5">
+            Safe mode: non-probe ships stay in federation space. Probes may venture further.
+          </div>
           <div className="text-slate-500 text-[10px]">
             Changes take effect on next Start. Stop + Start to apply.
           </div>
+        </div>
+      ) : null}
+
+      {state?.plans?.length ? (
+        <div className="mb-2 p-2 rounded border border-violet-900/60 bg-violet-950/20 space-y-1">
+          <div className="text-[10px] uppercase tracking-wider text-violet-300">Active plans</div>
+          {state.plans.map((p) => {
+            const step = p.steps[p.currentStep];
+            const stepAgeSec = Math.floor((Date.now() - p.stepStartedAt) / 1000);
+            return (
+              <div key={p.id} className="text-[11px] flex items-center gap-2 font-mono">
+                <span className="text-violet-200 font-semibold">{p.ship}</span>
+                <span className="text-slate-500">/</span>
+                <span className="text-slate-300">{p.goal}</span>
+                <span className="text-slate-500">·</span>
+                <span className="text-slate-400">
+                  step {p.currentStep + 1}/{p.steps.length}:{' '}
+                  <span className="text-violet-300">{step?.name || '—'}</span>
+                </span>
+                <span className="text-slate-600 ml-auto">{stepAgeSec}s</span>
+              </div>
+            );
+          })}
         </div>
       ) : null}
 

@@ -6,7 +6,7 @@ A strategic playbook for the AI-agent-driven multiplayer universe. Built from di
 
 ## 1. Core Model: What You Are Optimizing
 
-Gradient Bang is a sector-graph universe (~5000 sectors) where ships accumulate four distinct resources that feed back into each other:
+Gradient Bang is a hex-grid sector-graph universe (~5,000 sectors connected by warp edges) where ships accumulate four distinct resources that feed back into each other:
 
 | Resource | Gets You | Loses To |
 |---|---|---|
@@ -16,6 +16,27 @@ Gradient Bang is a sector-graph universe (~5000 sectors) where ships accumulate 
 | **Map knowledge** | Efficient routes, scarce-port discovery | Nothing — permanent (and shared with corp) |
 
 The leaderboard has four axes (**wealth / trading / exploration / territory**). Pick one primary axis — stretching across all four is always dominated by a focused corp fleet.
+
+### Universe topology
+
+Two space types exist:
+
+- **Federation Space** — ~75 sectors forming ONE connected cluster near the graph center. Selected by graph-distance (BFS hops) from the most central sector. Safe zones with ports and trade.
+- **Neutral Space** — everything else (~4,925 sectors). No faction protection; PvP unrestricted.
+
+Federation space is ONE contiguous cluster, not scattered pockets. Sector IDs look spread out (186-4971) but they're all reachable from each other via warp lanes. ~12 neutral "border sectors" sit on the perimeter where fedspace meets neutral.
+
+**Mega-ports** (production server — differs from codebase seed):
+
+| Sector | Notes |
+|--------|-------|
+| 305 | Home megaport |
+| 472 | Discovered megaport |
+| 1413 | Discovered megaport |
+
+**Note:** codebase `universe.json` (seed 1234) has megaports at 849/916/1214, but production uses different data. Sector 916 confirmed neutral in production. Don't assume codebase constants match live.
+
+**Implication for fleet ops:** haulers should trade within federation space (it's all one cluster). Probes should map outward into neutral space for general map coverage — fedspace discovery is largely complete since it's one connected region. New players spawn 2-8 hops from the nearest megaport within fedspace.
 
 **The single most important insight:** the price formula `multiplier ∈ [0.75, 1.3]` means max theoretical margin on one commodity round-trip is **~73%** (buy at 0.75, sell at 1.3 of base). Margins above that signal you've found an imbalanced route worth defending. Margins below 20% are not worth the warp power.
 

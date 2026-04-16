@@ -1,66 +1,122 @@
-import { getGameSnapshot, sendAssistantPrompt } from './cdp.js';
+import { getGameSnapshot, sendAssistantPrompt, clickGameReconnect, loginIfNeeded } from './cdp.js';
 import { observe as intelObserve, dangerousSectors } from './intel.js';
+import { buildRefuelPlan, buildFleetRallyPlan, FLEET_PLAN_KEY, currentStepOf, isComplete, advance } from './plans.js';
 
 const pick = (arr) => arr[Math.floor(Math.random() * arr.length)];
 
-const safeRoutingClause = () => {
+// Known mega-port sectors — strategic hubs within federation space.
+// Discovered so far; more may exist. Configurable via cfg.megaports.
+const DEFAULT_MEGAPORTS = [305, 472, 1413];
+const megaportList = () => (state.config?.megaports || DEFAULT_MEGAPORTS).join('/');
+const megaportSectors = () => state.config?.megaports || DEFAULT_MEGAPORTS;
+
+
+/**
+ * Standing policy clause appended to dispatch prompts so the agent knows how
+ * to handle a garrison toll without a round-trip. Default: pay small tolls,
+ * route around large ones. "Flee" is explicitly off the table because fleeing
+ * a toll triggers combat damage.
+ */
+/**
+ * Compact standing-orders suffix. All policy in one short bracket so the game
+ * chat input doesn't truncate the core task instruction.
+ */
+const standingOrders = (shipName = '', { isProbe = false, creditKeep = 1000 } = {}) => {
+  const cfg = state.config || {};
   const bad = dangerousSectors();
-  if (!bad.length) return '';
-  const list = bad.slice(0, 8).join(', ');
-  return pick([
-    ` avoid sectors ${list} if you can, closest megaport is fine if warp is tight.`,
-    ` route around ${list} if possible.`,
-    ` steer clear of ${list} if warp allows.`
-  ]);
+  const parts = [];
+  if (cfg.safeMode && !isProbe) parts.push('fedspace only');
+  if (bad.length) parts.push(`avoid ${bad.slice(0, 6).join(',')}`);
+  parts.push('avoid toll sectors, reroute around them; if unavoidable pay and never flee');
+  if (isProbe) parts.push('bank ALL credits at docks');
+  else if (creditKeep > 0) parts.push(`bank credits>${creditKeep} at docks`);
+  parts.push('execute now, no confirmation needed');
+  return ` [${parts.join('; ')}]`;
 };
 
+const interactiveOnlyClause = () => ' [no new task — interactive only]';
+
 const refuelPrompt = (ship, warp) => pick([
-  `${ship} is down to ${warp} warp. pull it off its task and send it to a megaport to recharge.` + safeRoutingClause(),
-  `${ship} fuel is low, ${warp} warp left. break off and route to a megaport to top off.` + safeRoutingClause(),
-  `fuel check on ${ship}, ${warp} warp. recall to a megaport and recharge.` + safeRoutingClause()
-]);
+  `${ship} is down to ${warp} warp, route to nearest megaport (${megaportList()}) to recharge.`,
+  `${ship} fuel low (${warp} warp). break off, head to megaport ${megaportList()} to top off.`,
+  `fuel check on ${ship}, ${warp} warp. recall to nearest megaport for recharge.`
+]) + standingOrders(ship);
+
+/**
+ * Stranded / near-stranded ship: warp too low to reliably reach a megaport.
+ * Ask the agent to transfer_warp_power from a nearby corpmate before the
+ * ship drains to 0 and is stuck for good. Short cooldown — this is urgent.
+ */
+const rescueStrandedPrompt = (ship, sector, warp) => {
+  const loc = sector != null ? ` at sector ${sector}` : '';
+  return pick([
+    `${ship} is stranded${loc} with ${warp} warp. nearest corpmate: transfer_warp_power to it, then route ${ship} to a megaport.`,
+    `emergency: ${ship}${loc}, ${warp} warp. pull a fueled corpmate, transfer_warp_power, megaport.`,
+    `${ship} dry${loc} (${warp} warp). rescue via transfer_warp_power from nearest corpmate, then megaport.`
+  ]) + standingOrders(ship) + interactiveOnlyClause();
+};
 
 const probeExplorePrompt = (probe, hops) => pick([
-  `${probe} is idle, put it on explore and salvage. map unvisited sectors within ${hops} hops, check each new sector for salvage, deposit credits at megaports, flee combat. avoid known hostile sectors.`,
-  `put ${probe} back to work. explore and salvage, ${hops} hop radius of unmapped space. claim salvage on arrival, bank credits when docked.`,
-  `${probe} needs a job. scout unmapped space out to ${hops} hops, grab salvage where you find it, drop credits at megaports.`
-]);
+  `${probe}: explore outward ${hops} hops, map unvisited sectors. salvage, bank at megaports, flee combat.`,
+  `${probe}: push ${hops} hops into uncharted space, map new sectors. salvage, bank when docked, flee hostiles.`,
+  `${probe}: explore ${hops} hops outward, map everything. salvage, bank credits, flee combat.`
+]) + standingOrders(probe, { isProbe: true });
 
 const haulerTradePrompt = (hauler) => pick([
-  `${hauler} is idle, start a trade task. fedspace or adjacent neutral only. find a 2-3 hop NS loop and run it. refuel as needed.` + safeRoutingClause(),
-  `put ${hauler} on a short NS trade loop, fedspace or adjacent only. refuel at megaports when warp dips.` + safeRoutingClause(),
-  `${hauler} needs a run. 2-3 hop NS loop near fedspace, refuel when low.` + safeRoutingClause()
-]);
+  `${hauler}: start a 2-3 hop trade loop, fedspace. prioritize Neuro-Symbolics (NS) — highest margin per unit. if a route's stock is depleted, rotate to a different loop. refuel as needed.`,
+  `put ${hauler} on a short fedspace trade loop, 2-3 hops. prefer NS commodity for best margins. rotate routes when stock runs low at ports. refuel when warp dips.`,
+  `${hauler} trade duty: 2-3 hop loop, fedspace. NS trades first (2.2x margin vs other goods). if ports are depleted, switch to an alternate route.`
+]) + standingOrders(hauler);
 
 const bankSweepPrompt = (excess, onHand, floor) => pick([
-  `next megaport stop, deposit ${excess} credits. leave about ${floor} on hand for working capital.`,
-  `bank sweep: deposit ${excess} at the next dock. keeping ${floor} on hand.`,
-  `deposit ${excess} credits on the next megaport visit, holding ${floor} for trades.`
+  `deposit ${excess} credits at next megaport, keep ${floor} on hand.` + interactiveOnlyClause(),
+  `bank sweep: deposit ${excess}, keep ${floor}.` + interactiveOnlyClause(),
+  `bank ${excess} credits next dock, hold ${floor}.` + interactiveOnlyClause()
+]);
+
+/**
+ * Per-corp-ship credit sweep. Corp ships don't have direct bank_deposit on
+ * every mechanic set, so we give the agent the option: deposit if docked, or
+ * transfer_credits to our primary ship to bank.
+ */
+const shipSweepPrompt = (ship, credits, excess, keep) => pick([
+  `${ship} has ${credits} credits. meet primary at same megaport, transfer_credits ${excess} to primary, primary bank_deposits. keep ${keep} on ${ship}.` + interactiveOnlyClause(),
+  `credit sweep ${ship} (${credits}): rendezvous with primary at a megaport, transfer ${excess}, primary banks. keep ${keep}.` + interactiveOnlyClause(),
+  `${ship}: ${credits} on hand. dock with primary, transfer_credits ${excess} to primary for banking. keep ${keep}.` + interactiveOnlyClause()
 ]);
 
 const upgradePrompt = (shipName, total, next) => pick([
-  `we have ${total} credits, enough for a ${next.name} (${next.price}). next megaport, trade in the ${shipName} and buy the ${next.name}, then resume trading.`,
-  `${total} credits available. swap the ${shipName} for a ${next.name} (${next.price}) at the next megaport.`,
-  `trade up: ${shipName} in, ${next.name} out, next dock. ${next.price} out of ${total} on hand and banked.`
+  `upgrade: swap ${shipName} for ${next.name} (${next.price}) at next megaport, resume trading.` + interactiveOnlyClause(),
+  `${total} credits available. trade ${shipName} for ${next.name} (${next.price}) at next dock.` + interactiveOnlyClause(),
+  `trade up: ${shipName} -> ${next.name}, next megaport. ${next.price} of ${total}.` + interactiveOnlyClause()
 ]);
 
 const primaryTradePrompt = (primary) => pick([
-  `start a short NS trade loop for the ${primary}, fedspace only. 2-3 hops, refuel when warp gets low.`,
-  `put the ${primary} on a fedspace NS trade loop. refuel as needed.`,
-  `${primary} on an NS trade loop, federation space only. 2-3 hops.`
-]);
+  `${primary}: trade loop, fedspace only, 2-3 hops. prioritize NS (Neuro-Symbolics) for best margins. rotate routes if port stock depletes. refuel when low.`,
+  `put ${primary} on a fedspace trade loop, prefer NS commodity. switch routes when stock runs low. refuel as needed.`,
+  `${primary} trade duty: 2-3 hop loop, federation space. NS first for max credits/warp. rotate if ports thin out.`
+]) + standingOrders(primary);
 
 const DEFAULTS = {
   pollIntervalSec: 60,
-  minWarp: 50,                    // below this: refuel
-  onHandFloor: 5000,              // working capital to keep on-hand for trades + fuel
-  depositExcessOver: 3000,        // if on-hand exceeds floor by this much, bank the difference
+  minWarp: 50,                    // below this: normal refuel (ship can still reach a megaport)
+  fuelCriticalWarp: 15,           // below this: emergency — request transfer_warp_power rescue
+  refuelCooldownSec: 180,         // per-ship: re-nag every 3 min if warp stays low
+  rescueCooldownSec: 90,          // per-ship: re-nag every 90s if stranded
+  creditsForRefuel: 1000,         // credits to transfer to a corp ship before recharge if it's broke
+  onHandFloor: 1000,              // working float to keep on-hand on every ship
+  depositExcessOver: 4000,        // trigger sweep when on-hand is floor+this (so 5000 → deposit 4000, leave 1000)
   decisionCooldownSec: 420,       // 7 min — longer than a typical refuel or task handoff
   exploreMaxHops: 40,
   considerUpgrades: true,
   upgradeCreditsThreshold: 100000,
   corpTaskCap: 3,                 // fallback if DOM taskSlots.total isn't reported
+  probeSlots: 2,                   // how many probes to keep exploring at once
+  tradeSlots: 2,                   // how many haulers/traders to keep running at once
   primaryDispatchCooldownSec: 300,  // 5 min — tight enough to refill the local slot quickly when a task ends
+  megaports: [305, 472, 1413],      // known mega-port sectors — add more as probes discover them
+  safeMode: true,                  // restrict non-probe ships to federation space
+  maxDecisionsPerTick: 2,          // never fire more than N prompts in one tick — avoids flooding the agent
   enabled: {
     refuel: true,
     explore: true,
@@ -80,7 +136,8 @@ const state = {
   lastDecisionAt: new Map(),
   seenEventKeys: new Set(),
   lastSnapshot: null,
-  subscribers: new Set()
+  subscribers: new Set(),
+  plans: new Map() // ship name → active plan (one at a time per ship)
 };
 
 /**
@@ -160,25 +217,68 @@ const appendLog = (entry) => {
 
 const shipKind = (name = '') => {
   const n = name.toUpperCase();
-  if (/PROBE/.test(n)) return 'probe';
-  if (/HAULER|FREIGHTER|LIFTER|ATLAS|PIONEER|WAYFARER/.test(n)) return 'hauler';
+  if (/PROBE|EXPLORER|SCAVENGER|SALVAGER|SCOUT|PATHFINDER/.test(n)) return 'probe';
+  if (/HAULER|FREIGHTER|LIFTER|ATLAS|PIONEER|WAYFARER|WAREZ|TRADER/.test(n)) return 'hauler';
   if (/KESTREL|SPARROW|COURIER/.test(n)) return 'trader-light';
   if (/CORSAIR|PIKE|BULWARK|AEGIS|SOVEREIGN|RAIDER|FRIGATE|DESTROYER|CRUISER/.test(n)) return 'combat';
+  if (/REFUELER|TANKER|FUEL/.test(n)) return 'probe';
   return 'unknown';
 };
 
+/**
+ * Inspect ship name for role hints. The user renames probes to encode
+ * intent ("refueler", "explorer", "scavenger"). decide() dispatches
+ * role-specific prompts when a role is found; otherwise falls back to the
+ * generic probeExplorePrompt.
+ */
+const probeRole = (name = '') => {
+  const n = name.toUpperCase();
+  if (/REFUELER|TANKER|FUEL[- ]?SHIP/.test(n)) return 'refueler';
+  if (/EXPLORER|SCOUT|PATHFINDER/.test(n)) return 'explorer';
+  if (/SCAVENGER|SALVAGER/.test(n)) return 'scavenger';
+  return null;
+};
+
+const refuelerDispatchPrompt = (refueler, target, targetSector, targetWarp) => {
+  const loc = targetSector != null ? ` @${targetSector}` : '';
+  return pick([
+    `${refueler}: rescue ${target}${loc} (${targetWarp} warp). plot_course, transfer_warp_power, then recharge at megaport.`,
+    `fuel drop: ${refueler} to ${target}${loc}, transfer warp, then ${refueler} recharges at a port.`,
+    `${refueler} rescue run: route to ${target}${loc}, transfer_warp_power, then megaport to top off.`
+  ]) + standingOrders(refueler, { isProbe: true });
+};
+
+const refuelerStandbyPrompt = (refueler) => pick([
+  `${refueler}: go to nearest megaport, top up warp, standby for rescue calls. no trade or explore.`,
+  `park ${refueler} at a megaport fully fueled, on-call for fuel drops.`,
+  `${refueler} standby: megaport, full warp, wait for emergencies.`
+]) + standingOrders(refueler, { isProbe: true });
+
+const scavengerPrompt = (scav, hops) => pick([
+  `${scav}: explore outward ${hops} hops, claim salvage, map new sectors. bank at megaports, flee combat.`,
+  `${scav}: ${hops} hops outward, sweep for salvage, map unvisited sectors. bank when docked, flee hostiles.`,
+  `${scav}: push ${hops} hops into uncharted space, claim salvage. bank credits, flee combat.`
+]) + standingOrders(scav, { isProbe: true });
+
+const explorerPrompt = (expl, hops) => pick([
+  `${expl}: explore ${hops} hops outward, map unvisited sectors. skip combat, bank at megaports.`,
+  `${expl}: map ${hops} hops into uncharted territory. flee combat, bank when docked.`,
+  `${expl}: explore ${hops} hops outward, map everything. bank at ${megaportList()}.`
+]) + standingOrders(expl, { isProbe: true });
+
 // Next upgrade tier by current ship class, from strategy.md.
-// price = next tier cost (before trade-in; we use it as a target only).
+// netCost = price minus ~60% trade-in value of the current ship. This is
+// what you actually need in cash to upgrade (the old ship covers the rest).
 const NEXT_UPGRADE = {
-  SPARROW: { name: 'Kestrel Courier', price: 25000 },
-  KESTREL: { name: 'Wayfarer Freighter', price: 120000 },
-  WAYFARER: { name: 'Pioneer Lifter', price: 220000 },
-  PIONEER: { name: 'Atlas Hauler', price: 260000 },
-  ATLAS: { name: 'Sovereign Starcruiser', price: 2500000 },
-  CORSAIR: { name: 'Pike Frigate', price: 300000 },
-  PIKE: { name: 'Bulwark Destroyer', price: 450000 },
-  BULWARK: { name: 'Aegis Cruiser', price: 700000 },
-  AEGIS: { name: 'Sovereign Starcruiser', price: 2500000 }
+  SPARROW: { name: 'Kestrel Courier', price: 25000, netCost: 10000 },
+  KESTREL: { name: 'Wayfarer Freighter', price: 120000, netCost: 105000 },
+  WAYFARER: { name: 'Pioneer Lifter', price: 220000, netCost: 148000 },
+  PIONEER: { name: 'Atlas Hauler', price: 260000, netCost: 128000 },
+  ATLAS: { name: 'Sovereign Starcruiser', price: 2500000, netCost: 2344000 },
+  CORSAIR: { name: 'Pike Frigate', price: 300000, netCost: 192000 },
+  PIKE: { name: 'Bulwark Destroyer', price: 450000, netCost: 270000 },
+  BULWARK: { name: 'Aegis Cruiser', price: 700000, netCost: 430000 },
+  AEGIS: { name: 'Sovereign Starcruiser', price: 2500000, netCost: 2080000 }
 };
 
 const findNextUpgrade = (shipName = '') => {
@@ -196,6 +296,10 @@ const canAct = (key, cooldownMs) => {
 
 /**
  * Inspect snapshot and return a list of { key, text, ship? } decisions.
+ * A decision may instead carry `createPlan: <Plan>`, which the caller stores
+ * in state.plans and fires the first step of. Ships with an active plan are
+ * skipped here — their plan owns their dispatch until it completes.
+ *
  * Caller applies cooldown dedup and sends prompts.
  */
 const decide = (snapshot) => {
@@ -204,14 +308,80 @@ const decide = (snapshot) => {
   const ships = ex.ships || [];
   const out = [];
   const cooldownMs = cfg.decisionCooldownSec * 1000;
+  const hasPlan = (name) => state.plans.has(name);
 
-  // Refuel guard runs first for every ship (including active ones — a break-off
+  // When a fleet-wide rally plan is running, it owns every ship — skip all
+  // per-ship decisions so we don't interfere with the coordinated operation.
+  if (state.plans.has(FLEET_PLAN_KEY)) return out;
+
+  // Task-slot budget. Every autonomous task (trade, explore, refuel sequence,
+  // rescue run…) consumes one of the 4 shared slots. Prefer the DOM's own
+  // "N/M SLOTS USED" counter — it's authoritative and covers the player's
+  // local task slot too. Fall back to activeCorp when that scrape is absent.
+  const domUsed = ex.taskSlots?.used;
+  const domTotalSlots = ex.taskSlots?.total;
+  let slotBudget;
+  if (domUsed != null && domTotalSlots != null) {
+    slotBudget = Math.max(0, domTotalSlots - domUsed);
+  } else {
+    const activeNow = ships.filter((s) => s.active === true).length;
+    slotBudget = Math.max(0, (cfg.corpTaskCap + 1) - activeNow);
+  }
+  // Plans currently under way also occupy a slot for their lifetime (each plan
+  // has the agent running some kind of task on its ship).
+  const pushTaskDecision = (d) => {
+    if (slotBudget <= 0) return false;
+    slotBudget -= 1;
+    out.push({ ...d, createsTask: true });
+    return true;
+  };
+  const pushInteractive = (d) => out.push({ ...d, createsTask: false });
+
+  // Fuel guard runs first for every ship (including active ones — a break-off
   // order to recharge supersedes any running task).
+  //
+  // Two tiers:
+  //   - warp < fuelCriticalWarp → STRANDED. Ship probably can't reach a megaport
+  //     under its own power. Emit rescueStrandedPrompt so the agent uses
+  //     transfer_warp_power from a nearby corpmate. Short cooldown (90s) so we
+  //     keep nagging until the rescue happens.
+  //   - warp < minWarp → LOW. Standard refuel prompt: break off, route to megaport.
+  //     Medium cooldown (180s) — tighter than the general decisionCooldown so we
+  //     don't let a ship drain from 50 to 0 across a single 7-min cooldown window.
+  // Identify a dedicated refueler probe (name-based). If present, stranded
+  // ships get a targeted refueler dispatch instead of the generic rescue prompt.
+  const refueler = ships.find((s) => probeRole(s.name) === 'refueler' && !s.primary);
+  const refuelerAvailable = refueler && refueler.active === false
+    && refueler.warpPower != null
+    && refueler.warpPower >= Math.max(cfg.minWarp, 100);
+
   for (const s of ships) {
-    if (cfg.enabled.refuel && s.warpPower != null && s.warpPower < cfg.minWarp) {
-      const key = `refuel:${s.name}`;
-      if (canAct(key, cooldownMs)) {
-        out.push({ key, ship: s.name, text: refuelPrompt(s.name, s.warpPower) });
+    if (!cfg.enabled.refuel) continue;
+    if (s.warpPower == null) continue;
+    if (hasPlan(s.name)) continue; // plan owns this ship's next action
+    if (s.warpPower < cfg.fuelCriticalWarp) {
+      // Stranded. transfer_warp_power is a single interactive call — doesn't
+      // need a task slot. Refueler dispatch *is* a multi-step trip (route →
+      // transfer → return) so it takes a slot.
+      const targetIsRefueler = refueler && s.name === refueler.name;
+      if (refuelerAvailable && !targetIsRefueler) {
+        const key = `refueler-dispatch:${s.name}`;
+        if (canAct(key, cfg.rescueCooldownSec * 1000)) {
+          pushTaskDecision({ key, ship: refueler.name, text: refuelerDispatchPrompt(refueler.name, s.name, s.sector, s.warpPower) });
+        }
+      } else {
+        const key = `rescue:${s.name}`;
+        if (canAct(key, cfg.rescueCooldownSec * 1000)) {
+          pushInteractive({ key, ship: s.name, text: rescueStrandedPrompt(s.name, s.sector, s.warpPower) });
+        }
+      }
+    } else if (s.warpPower < cfg.minWarp) {
+      // Low fuel, ship can still move itself. A refuel plan runs an autonomous
+      // task on this ship, so it consumes a slot.
+      if (slotBudget > 0) {
+        const plan = buildRefuelPlan(s, { creditsForRefuel: cfg.creditsForRefuel });
+        slotBudget -= 1;
+        out.push({ key: `plan-create:refuel:${s.name}`, ship: s.name, createPlan: plan, createsTask: true });
       }
     }
   }
@@ -232,7 +402,8 @@ const decide = (snapshot) => {
   const idleCorp = corpShips.filter((s) => s.active === false && s.warpPower != null && s.warpPower >= cfg.minWarp);
 
   const activeProbeCount = activeCorp.filter((s) => shipKind(s.name) === 'probe').length;
-  const idleProbes = idleCorp.filter((s) => shipKind(s.name) === 'probe');
+  // Refuelers are managed by the rescue flow above — don't dispatch them on explore/salvage.
+  const idleProbes = idleCorp.filter((s) => shipKind(s.name) === 'probe' && probeRole(s.name) !== 'refueler');
   const idleHaulers = idleCorp.filter((s) => ['hauler', 'trader-light'].includes(shipKind(s.name)));
 
   idleHaulers.sort((a, b) => (b.warpPower || 0) - (a.warpPower || 0));
@@ -247,37 +418,88 @@ const decide = (snapshot) => {
   );
   let remainingSlots = Math.max(0, effectiveCorpCap - activeCorp.length);
 
-  // Reserve slot 1 for a probe (if no probe is already running and we have one idle).
-  if (remainingSlots > 0 && cfg.enabled.explore && activeProbeCount === 0 && idleProbes.length > 0) {
-    const probe = idleProbes[0];
-    const key = `explore:${probe.name}`;
-    if (canAct(key, cooldownMs)) {
-      out.push({ key, ship: probe.name, text: probeExplorePrompt(probe.name, cfg.exploreMaxHops) });
+  // Balanced fleet allocation: cfg.probeSlots probes exploring + cfg.tradeSlots
+  // haulers trading. Probes and haulers each get their own quota so one type
+  // doesn't starve the other of task slots.
+  //
+  // Probe dispatch: fill up to probeSlots. When no rescue is pending, the
+  // refueler is also eligible for exploration (the user repurposes it to
+  // explore when no ship needs fuel).
+  const probeTarget = cfg.probeSlots ?? 2;
+  const allIdleProbes = idleCorp.filter((s) => shipKind(s.name) === 'probe');
+  allIdleProbes.sort((a, b) => (b.warpPower || 0) - (a.warpPower || 0));
+  const needsRescue = out.some((d) => d.key?.startsWith('rescue:') || d.key?.startsWith('refueler-dispatch:'));
+  let probesSent = activeProbeCount;
+
+  for (const probe of allIdleProbes) {
+    if (probesSent >= probeTarget) break;
+    if (remainingSlots <= 0) break;
+    if (!cfg.enabled.explore) break;
+    if (hasPlan(probe.name)) continue;
+    // If this is the refueler and a rescue is pending, skip — it's busy.
+    if (probeRole(probe.name) === 'refueler' && needsRescue) continue;
+    const role = probeRole(probe.name);
+    const key = `${role || 'explore'}:${probe.name}`;
+    if (!canAct(key, cooldownMs)) continue;
+    let text;
+    if (role === 'explorer') text = explorerPrompt(probe.name, cfg.exploreMaxHops);
+    else if (role === 'scavenger') text = scavengerPrompt(probe.name, cfg.exploreMaxHops);
+    else if (role === 'refueler') text = probeExplorePrompt(probe.name, cfg.exploreMaxHops);
+    else text = probeExplorePrompt(probe.name, cfg.exploreMaxHops);
+    if (pushTaskDecision({ key, ship: probe.name, text })) {
       remainingSlots -= 1;
+      probesSent += 1;
     }
   }
 
-  // Fill remaining slots with haulers on safe trade loops.
+  // Fill up to tradeSlots with haulers on safe trade loops.
+  const tradeTarget = cfg.tradeSlots ?? 2;
+  const activeTradeCount = activeCorp.filter((s) => ['hauler', 'trader-light'].includes(shipKind(s.name))).length;
+  let tradesSent = activeTradeCount;
+
   for (const hauler of idleHaulers) {
+    if (tradesSent >= tradeTarget) break;
     if (remainingSlots <= 0) break;
     if (!cfg.enabled.trade) break;
+    if (hasPlan(hauler.name)) continue;
     const key = `trade:${hauler.name}`;
     if (!canAct(key, cooldownMs)) continue;
-    out.push({ key, ship: hauler.name, text: haulerTradePrompt(hauler.name) });
-    remainingSlots -= 1;
+    if (pushTaskDecision({ key, ship: hauler.name, text: haulerTradePrompt(hauler.name) })) {
+      remainingSlots -= 1;
+      tradesSent += 1;
+    }
   }
 
-  // Bank excess on-hand aggressively. Anything above cfg.onHandFloor is working
-  // capital risk — sweep it to the bank whenever we're docked. Runs independently
-  // of the bank balance (the bank has no ceiling; on-hand is the danger).
+  // Bank excess credits aggressively for EVERY ship, not just the player's on-hand.
+  // Destruction drops whatever the ship is carrying; bank balance is untouchable.
+  // Policy: when a ship reaches (onHandFloor + depositExcessOver) credits,
+  // sweep down to onHandFloor at the next megaport.
   if (cfg.enabled.bank) {
+    // Player on-hand (comes from the top-bar, not the per-ship credits field).
     const onHand = ex.creditsOnHand ?? 0;
     const excess = onHand - cfg.onHandFloor;
     if (excess >= cfg.depositExcessOver) {
       const key = 'bank:sweep';
       if (canAct(key, cooldownMs)) {
-        out.push({ key, text: bankSweepPrompt(excess, onHand, cfg.onHandFloor) });
+        pushInteractive({ key, text: bankSweepPrompt(excess, onHand, cfg.onHandFloor) });
       }
+    }
+
+    // Per-corp-ship sweep: each ship gets its own cooldown so we can nag any
+    // cash-heavy ship independently of the others.
+    for (const s of ships) {
+      if (s.primary) continue; // primary is handled by the player on-hand branch above
+      if (s.credits == null) continue;
+      if (hasPlan(s.name)) continue;
+      const shipExcess = s.credits - cfg.onHandFloor;
+      if (shipExcess < cfg.depositExcessOver) continue;
+      const key = `bank:ship:${s.name}`;
+      if (!canAct(key, cooldownMs)) continue;
+      pushInteractive({
+        key,
+        ship: s.name,
+        text: shipSweepPrompt(s.name, s.credits, shipExcess, cfg.onHandFloor)
+      });
     }
   }
 
@@ -289,10 +511,11 @@ const decide = (snapshot) => {
     const bank = ex.creditsBank ?? 0;
     const onHand = ex.creditsOnHand ?? 0;
     const total = bank + onHand;
-    if (next && total >= next.price) {
+    if (next && total >= (next.netCost ?? next.price)) {
       const key = `upgrade:${next.name}`;
       if (canAct(key, cooldownMs * 2)) {
-        out.push({ key, text: upgradePrompt(ex.shipName, total, next) });
+        // Ship swap happens at a dock in one sitting — interactive, not a task.
+        pushInteractive({ key, text: upgradePrompt(ex.shipName, total, next) });
       }
     }
   }
@@ -311,11 +534,12 @@ const decide = (snapshot) => {
       primary &&
       !primaryHasTask &&
       primary.warpPower != null &&
-      primary.warpPower >= cfg.minWarp
+      primary.warpPower >= cfg.minWarp &&
+      !hasPlan(primary.name)
     ) {
       const key = 'primary:trade';
       if (canAct(key, cfg.primaryDispatchCooldownSec * 1000)) {
-        out.push({ key, ship: primary.name, text: primaryTradePrompt(primary.name) });
+        pushTaskDecision({ key, ship: primary.name, text: primaryTradePrompt(primary.name) });
       }
     }
   }
@@ -323,11 +547,91 @@ const decide = (snapshot) => {
   return out;
 };
 
+/**
+ * Walk each active plan against the latest snapshot. Advance steps whose
+ * isDone() returns true (or whose maxMs has elapsed), fire the newly-active
+ * step's prompt, and drop completed plans. Stalled steps get re-prompted on
+ * each step's nagMs cadence.
+ */
+const processPlans = async (snapshot) => {
+  const ships = snapshot?.extracted?.ships || [];
+  const doneShips = [];
+
+  for (const [shipName, plan] of state.plans) {
+    // Fleet plans use a sentinel key; isDone gets the full snapshot, not a ship.
+    const isFleet = shipName === FLEET_PLAN_KEY;
+    const ship = isFleet ? null : ships.find((s) => s.name === shipName);
+    if (!isFleet && !ship) continue; // ship not in snapshot yet; wait a tick
+    const step = currentStepOf(plan);
+    if (!step) { doneShips.push(shipName); continue; }
+
+    const done = !!step.isDone?.(snapshot, ship, plan);
+    const stepAge = Date.now() - plan.stepStartedAt;
+    const timedOut = step.maxMs != null && stepAge > step.maxMs;
+
+    if (done || timedOut) {
+      advance(plan, done ? 'done' : 'timeout');
+      appendLog({
+        type: 'plan',
+        shipName,
+        goal: plan.goal,
+        event: 'advance',
+        fromStep: step.name,
+        reason: done ? 'done' : 'timeout',
+        stepAgeMs: stepAge
+      });
+      if (isComplete(plan)) {
+        appendLog({ type: 'plan', shipName, goal: plan.goal, event: 'complete' });
+        doneShips.push(shipName);
+        continue;
+      }
+      const next = currentStepOf(plan);
+      const send = await sendAssistantPrompt(next.prompt).catch((e) => ({ ok: false, error: e.message }));
+      plan.lastPromptedAt = Date.now();
+      plan.promptCount += 1;
+      appendLog({ type: 'plan', shipName, goal: plan.goal, event: 'prompt', step: next.name, text: next.prompt, send });
+    } else {
+      // Nag: step still running — re-send the prompt if it's been a while.
+      const sinceLast = Date.now() - (plan.lastPromptedAt || plan.stepStartedAt);
+      const nagMs = step.nagMs ?? 120_000;
+      if (sinceLast > nagMs) {
+        const send = await sendAssistantPrompt(step.prompt).catch((e) => ({ ok: false, error: e.message }));
+        plan.lastPromptedAt = Date.now();
+        plan.promptCount += 1;
+        appendLog({ type: 'plan', shipName, goal: plan.goal, event: 'nag', step: step.name, text: step.prompt, send });
+      }
+    }
+  }
+
+  for (const s of doneShips) state.plans.delete(s);
+};
+
 const runTick = async () => {
   if (!state.running) return;
   try {
     const snapshot = await getGameSnapshot();
     state.lastSnapshot = snapshot;
+    if (snapshot && snapshot.connected === false) {
+      appendLog({ type: 'error', error: `cdp disconnected${snapshot.error ? ': ' + snapshot.error : ''} — will retry next tick` });
+      return;
+    }
+    if (snapshot?.extracted?.gameDisconnected) {
+      const click = await clickGameReconnect().catch((e) => ({ ok: false, error: e.message }));
+      // Give the game a beat to tear down the modal and render whatever comes next
+      // (fresh HUD if the session survived, or a login form if it didn't), then
+      // run loginIfNeeded — it's a no-op when we're already authed, and a full
+      // login + character-select flow otherwise.
+      await new Promise((r) => setTimeout(r, 1500));
+      const login = await loginIfNeeded().catch((e) => ({ ok: false, error: e.message }));
+      appendLog({
+        type: 'event',
+        intelType: 'game-disconnect',
+        snippet: 'game "DISCONNECTED" modal — clicked RECONNECT, then loginIfNeeded',
+        click,
+        login
+      });
+      return;
+    }
 
     // Threat intel — detect destructions / hostile chat events.
     const intelEvents = intelObserve(snapshot);
@@ -350,10 +654,36 @@ const runTick = async () => {
       }
     }
 
+    // Auto-confirm: the agent sometimes asks "would you like me to...?" instead
+    // of just executing. Scan the last few chat messages for assistant questions
+    // that look like confirmation prompts, and auto-respond "yes, proceed".
+    const msgs = snapshot?.extracted?.lastMessages || [];
+    const lastAssistantMsg = [...msgs].reverse().find((m) => m && /ASSISTANT[:\s]/i.test(m));
+    if (lastAssistantMsg) {
+      const isQuestion = /\?\s*$/.test(lastAssistantMsg) ||
+        /would you like|shall I|should I|ready to|want me to|do you want/i.test(lastAssistantMsg);
+      const lastUserMsg = [...msgs].reverse().find((m) => m && /USER[:\s]/i.test(m));
+      const userAlreadyReplied = lastUserMsg && msgs.indexOf(lastUserMsg) > msgs.indexOf(lastAssistantMsg);
+      if (isQuestion && !userAlreadyReplied) {
+        const key = `auto-confirm:${lastAssistantMsg.slice(0, 60)}`;
+        if (!state.seenEventKeys.has(key)) {
+          state.seenEventKeys.add(key);
+          await sendAssistantPrompt('yes, proceed').catch(() => {});
+          appendLog({ type: 'event', intelType: 'auto-confirm', snippet: lastAssistantMsg.slice(0, 120) });
+        }
+      }
+    }
+
+    // Process any active multi-step plans first — they own their ships' next
+    // actions and suppress one-shot decide() dispatches for the same ship.
+    await processPlans(snapshot);
+
     const decisions = decide(snapshot);
 
     const corpActiveCount = (snapshot?.extracted?.ships || []).filter((s) => !s.primary && s.active === true).length;
     const cappedNow = corpActiveCount >= state.config.corpTaskCap;
+    const slotsUsed = snapshot?.extracted?.taskSlots?.used;
+    const slotsTotal = snapshot?.extracted?.taskSlots?.total;
     appendLog({
       type: 'tick',
       snapshot: snapshot?.extracted ? {
@@ -366,16 +696,53 @@ const runTick = async () => {
         tasksRunning: (snapshot.extracted.tasks || []).filter((t) => t.working).length,
         corpActive: corpActiveCount,
         corpTaskCap: state.config.corpTaskCap,
+        taskSlots: slotsUsed != null && slotsTotal != null ? `${slotsUsed}/${slotsTotal}` : null,
         capped: cappedNow
       } : null,
       decisionCount: decisions.length,
       capped: cappedNow
     });
 
+    // Guards: one action per ship per tick, and a global cap to avoid
+    // flooding the agent's input with back-to-back prompts.
+    const maxPerTick = state.config.maxDecisionsPerTick ?? 2;
+    const shipsPrompted = new Set();
+    let promptsSent = 0;
+
     for (const d of decisions) {
-      const send = await sendAssistantPrompt(d.text).catch((e) => ({ ok: false, error: e.message }));
-      state.lastDecisionAt.set(d.key, Date.now());
-      appendLog({ type: 'decision', key: d.key, ship: d.ship, text: d.text, send });
+      if (promptsSent >= maxPerTick) {
+        appendLog({ type: 'decision', key: d.key, ship: d.ship, text: '(deferred — hit per-tick cap)', skipped: true });
+        continue;
+      }
+      if (d.ship && shipsPrompted.has(d.ship)) {
+        appendLog({ type: 'decision', key: d.key, ship: d.ship, text: '(deferred — ship already prompted this tick)', skipped: true });
+        continue;
+      }
+
+      if (d.createPlan) {
+        state.plans.set(d.ship, d.createPlan);
+        state.lastDecisionAt.set(d.key, Date.now());
+        const first = currentStepOf(d.createPlan);
+        const send = await sendAssistantPrompt(first.prompt).catch((e) => ({ ok: false, error: e.message }));
+        d.createPlan.lastPromptedAt = Date.now();
+        d.createPlan.promptCount += 1;
+        appendLog({
+          type: 'plan',
+          shipName: d.ship,
+          goal: d.createPlan.goal,
+          event: 'create',
+          stepCount: d.createPlan.steps.length,
+          step: first.name,
+          text: first.prompt,
+          send
+        });
+      } else {
+        const send = await sendAssistantPrompt(d.text).catch((e) => ({ ok: false, error: e.message }));
+        state.lastDecisionAt.set(d.key, Date.now());
+        appendLog({ type: 'decision', key: d.key, ship: d.ship, text: d.text, send });
+      }
+      if (d.ship) shipsPrompted.add(d.ship);
+      promptsSent += 1;
     }
   } catch (err) {
     appendLog({ type: 'error', error: err.message });
@@ -397,6 +764,7 @@ export const startAutopilot = (config = {}) => {
   state.startedAt = Date.now();
   state.lastDecisionAt.clear();
   state.seenEventKeys.clear();
+  state.plans.clear();
   state.log.length = 0;
   appendLog({ type: 'start', config: state.config });
   runTick();
@@ -418,8 +786,47 @@ export const getAutopilotState = () => ({
   startedAt: state.startedAt,
   lastSnapshot: state.lastSnapshot?.extracted || null,
   log: state.log.slice(-200),
-  lastDecisions: Object.fromEntries(state.lastDecisionAt)
+  lastDecisions: Object.fromEntries(state.lastDecisionAt),
+  plans: Array.from(state.plans.values()).map((p) => ({
+    id: p.id,
+    ship: p.ship,
+    goal: p.goal,
+    currentStep: p.currentStep,
+    steps: p.steps.map((s) => ({ name: s.name })),
+    stepStartedAt: p.stepStartedAt,
+    promptCount: p.promptCount,
+    history: p.history
+  }))
 });
+
+export const startFleetRally = async (opts = {}) => {
+  if (state.plans.has(FLEET_PLAN_KEY)) {
+    return { ok: false, error: 'fleet rally already in progress' };
+  }
+  // Read current fleet from last snapshot.
+  const ships = state.lastSnapshot?.extracted?.ships || [];
+  if (ships.length === 0) return { ok: false, error: 'no ships in snapshot — is CDP connected?' };
+  const plan = buildFleetRallyPlan(ships, {
+    keepCredits: opts.keepCredits ?? state.config?.onHandFloor ?? 1000,
+    megaports: megaportSectors()
+  });
+  state.plans.set(FLEET_PLAN_KEY, plan);
+  const first = currentStepOf(plan);
+  const send = await sendAssistantPrompt(first.prompt).catch((e) => ({ ok: false, error: e.message }));
+  plan.lastPromptedAt = Date.now();
+  plan.promptCount = 1;
+  appendLog({
+    type: 'plan',
+    shipName: FLEET_PLAN_KEY,
+    goal: 'rally',
+    event: 'create',
+    stepCount: plan.steps.length,
+    step: first.name,
+    text: first.prompt,
+    send
+  });
+  return { ok: true, stepCount: plan.steps.length, shipCount: ships.length };
+};
 
 export const subscribeAutopilotLog = (fn) => {
   state.subscribers.add(fn);

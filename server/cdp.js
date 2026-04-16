@@ -85,11 +85,15 @@ export const getConnectionStatus = async () => {
  * and TopBarCreditBalance. Values read via icon-adjacent numeric text.
  */
 export const getGameSnapshot = async () => {
-  const page = state.page;
-  if (!page || page.isClosed()) {
-    return { ok: false, connected: false };
+  let page;
+  try {
+    page = await withPage();
+  } catch (err) {
+    return { ok: false, connected: false, error: err.message };
   }
-  const snap = await page.evaluate(() => {
+  let snap;
+  try {
+    snap = await page.evaluate(() => {
     const toNum = (s) => {
       if (!s) return null;
       const m = String(s).replace(/,/g, '').match(/-?\d+(\.\d+)?/);
@@ -275,9 +279,44 @@ export const getGameSnapshot = async () => {
     }
     extracted.lastMessages = lastMessages;
 
+    // Game-level "DISCONNECTED" modal: body text calls out the disconnect and a
+    // RECONNECT button is the only actionable element. Detect by looking for
+    // the heading word plus the button.
+    const bodyTxt = (document.body?.innerText || '').toUpperCase();
+    const hasDisconnectedHeading = /\bDISCONNECTED\b/.test(bodyTxt)
+      && /DISCONNECTED FROM THE GAME/.test(bodyTxt);
+    const reconnectBtn = Array.from(document.querySelectorAll('button'))
+      .find((b) => /^\s*RECONNECT\s*$/i.test(b.innerText || ''));
+    extracted.gameDisconnected = !!(hasDisconnectedHeading && reconnectBtn);
+
     return { extracted };
   });
+  } catch (err) {
+    return { ok: false, connected: false, error: err.message };
+  }
   return { ok: true, connected: true, url: page.url(), ...snap };
+};
+
+/**
+ * Click the RECONNECT button on the in-game "DISCONNECTED" modal.
+ * Returns ok:false if no such button is visible.
+ */
+export const clickGameReconnect = async () => {
+  let page;
+  try {
+    page = await withPage();
+  } catch (err) {
+    return { ok: false, error: err.message };
+  }
+  const clicked = await page.evaluate(() => {
+    const btn = Array.from(document.querySelectorAll('button'))
+      .find((b) => /^\s*RECONNECT\s*$/i.test(b.innerText || ''));
+    if (!btn) return { ok: false, reason: 'no-reconnect-button' };
+    btn.scrollIntoView({ block: 'center' });
+    btn.click();
+    return { ok: true };
+  });
+  return clicked;
 };
 
 const SEND_THROTTLE_MS = 2100;
