@@ -33,7 +33,21 @@ const formatEntry = (e) => {
 export const MissionDetail = ({ missionId, onAbort, onUntrack }) => {
   const [mission, setMission] = useState(null);
   const [entries, setEntries] = useState([]);
+  const [untrackArmed, setUntrackArmed] = useState(false);
+  const untrackTimer = useRef(null);
   const scrollRef = useRef(null);
+
+  const handleUntrack = () => {
+    if (!untrackArmed) {
+      setUntrackArmed(true);
+      if (untrackTimer.current) clearTimeout(untrackTimer.current);
+      untrackTimer.current = setTimeout(() => setUntrackArmed(false), 5000);
+      return;
+    }
+    if (untrackTimer.current) { clearTimeout(untrackTimer.current); untrackTimer.current = null; }
+    setUntrackArmed(false);
+    onUntrack(missionId);
+  };
 
   useEffect(() => {
     if (!missionId) {
@@ -84,10 +98,10 @@ export const MissionDetail = ({ missionId, onAbort, onUntrack }) => {
           ) : (
             <span className="text-xs text-slate-500 mr-2">{mission?.status}</span>
           )}
-          <button onClick={() => onUntrack(missionId)}
-            className="px-2 py-1 rounded border border-slate-700 hover:border-slate-500 text-slate-400 text-xs flex items-center gap-1"
-            title="Remove from tracking without messaging the game agent">
-            <X className="w-3 h-3" /> Untrack
+          <button onClick={handleUntrack}
+            className={`px-2 py-1 rounded text-xs flex items-center gap-1 border ${untrackArmed ? 'border-rose-500 text-rose-300 animate-pulse' : 'border-slate-700 hover:border-slate-500 text-slate-400'}`}
+            title={untrackArmed ? 'Click again within 5s to confirm (no stop command sent)' : 'Remove from tracking without messaging the game agent'}>
+            <X className="w-3 h-3" /> {untrackArmed ? 'Confirm?' : 'Untrack'}
           </button>
         </div>
       </div>

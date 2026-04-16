@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import { Skull, MapPin, UserX, Plus, Trash2, RefreshCcw, Edit2, Search } from 'lucide-react';
 
 const eventColor = (type) => {
@@ -17,6 +17,8 @@ export const IntelPanel = () => {
   const [editingId, setEditingId] = useState(null);
   const [editForm, setEditForm] = useState({});
   const [queryMsg, setQueryMsg] = useState(null);
+  const [clearArmed, setClearArmed] = useState(false);
+  const clearTimer = useRef(null);
 
   const refresh = async () => {
     const r = await fetch('/api/intel').then((r) => r.json());
@@ -54,7 +56,14 @@ export const IntelPanel = () => {
   };
 
   const clearAll = async () => {
-    if (!confirm('Clear all intel?')) return;
+    if (!clearArmed) {
+      setClearArmed(true);
+      if (clearTimer.current) clearTimeout(clearTimer.current);
+      clearTimer.current = setTimeout(() => setClearArmed(false), 5000);
+      return;
+    }
+    if (clearTimer.current) { clearTimeout(clearTimer.current); clearTimer.current = null; }
+    setClearArmed(false);
     await fetch('/api/intel', { method: 'DELETE' });
     await refresh();
   };
@@ -111,8 +120,9 @@ export const IntelPanel = () => {
             <Plus className="w-3 h-3" /> Log
           </button>
           <button onClick={clearAll}
-            className="px-2 py-1 rounded border border-rose-900 hover:border-rose-500 text-rose-300 text-xs">
-            Clear
+            className={`px-2 py-1 rounded text-xs border ${clearArmed ? 'border-rose-500 text-rose-300 animate-pulse' : 'border-rose-900 hover:border-rose-500 text-rose-300'}`}
+            title={clearArmed ? 'Click again within 5s to confirm' : 'Clear all intel'}>
+            {clearArmed ? 'Confirm?' : 'Clear'}
           </button>
         </div>
       </div>

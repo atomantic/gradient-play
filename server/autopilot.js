@@ -109,6 +109,25 @@ const primaryTradePrompt = (primary) => pick([
   `${primary}: NS 2-3 hop loop, fedspace, rotate routes as needed`
 ]) + standingOrders(primary);
 
+/**
+ * Reckless frontier mode for the primary ship. Leaves fedspace, hunts
+ * salvage, engages combat, trades only for fuel money. Comes home to the
+ * megaport hub when warp gets low. Safe-mode is explicitly bypassed.
+ */
+const primaryTroubleMakerPrompt = (primary) => {
+  const bad = dangerousSectors();
+  const parts = [];
+  if (bad.length) parts.push(`avoid ${bad.slice(0, 6).join(',')}`);
+  parts.push('avoid tolls');
+  parts.push('execute now');
+  const orders = ` [${parts.join('; ')}]`;
+  return pick([
+    `${primary}: troublemaker run. bank_deposit down to 1000 on-hand first, then push beyond fedspace. hunt salvage, engage combat when profitable, trade only for fuel money. return to hub ${homeHub()} to recharge_warp_power when warp runs low.`,
+    `${primary}: frontier salvage hunt. first deposit excess to bank (keep 1000), then exit fedspace, claim salvage, combat OK, trade as needed to stay fueled. hub ${homeHub()} for refuel cycles.`,
+    `${primary}: reckless explorer. deposit bank down to 1000 on-hand, venture into the unknown beyond fedspace, grab salvage, fight for it, trade minimally for fuel. refuel at hub ${homeHub()} between runs.`
+  ]) + orders;
+};
+
 const DEFAULTS = {
   pollIntervalSec: 60,
   minWarp: 50,                    // below this: normal refuel (ship can still reach a megaport)
@@ -132,6 +151,7 @@ const DEFAULTS = {
   homeHub: 1413,                    // preferred dock for fuel/banking — the fleet's home base
   safeMode: true,                  // restrict non-probe ships to federation space
   isCeo: false,                    // only CEO can manage corp ships; non-CEO autopilot only drives the primary
+  troubleMaker: false,             // reckless mode: primary leaves fedspace for salvage + combat + frontier trading
   maxDecisionsPerTick: 2,          // never fire more than N prompts in one tick — avoids flooding the agent
   enabled: {
     refuel: true,
@@ -607,9 +627,12 @@ const decide = (snapshot) => {
       primary.warpPower >= cfg.minWarp &&
       !hasPlan(primary.name)
     ) {
-      const key = 'primary:trade';
+      const key = cfg.troubleMaker ? 'primary:troublemaker' : 'primary:trade';
       if (canAct(key, cfg.primaryDispatchCooldownSec * 1000)) {
-        pushTaskDecision({ key, ship: primary.name, text: primaryTradePrompt(primary.name) });
+        const text = cfg.troubleMaker
+          ? primaryTroubleMakerPrompt(primary.name)
+          : primaryTradePrompt(primary.name);
+        pushTaskDecision({ key, ship: primary.name, text });
       }
     }
   }
@@ -724,17 +747,29 @@ const runTick = async () => {
       }
     }
 
-    // Auto-confirm: the agent sometimes asks "would you like me to...?" instead
-    // of just executing. Scan the last few chat messages for assistant questions
-    // that look like confirmation prompts, and auto-respond "yes, proceed".
+    // Auto-confirm: the agent occasionally stalls with an explicit confirmation
+    // request instead of just executing ("Ready to transfer… on your order").
+    // Only fire on VERY explicit ask-for-approval patterns — status updates
+    // like "Fleet operations are ongoing" must NOT trigger. Word boundaries
+    // keep "ready to" from matching "already to" etc.
     const msgs = snapshot?.extracted?.lastMessages || [];
     const lastAssistantMsg = [...msgs].reverse().find((m) => m && /ASSISTANT[:\s]/i.test(m));
     if (lastAssistantMsg) {
-      const isQuestion = /\?\s*$/.test(lastAssistantMsg) ||
-        /would you like|shall I|should I|ready to|want me to|do you want/i.test(lastAssistantMsg);
+      const endsWithQuestion = /\?\s*$/.test(lastAssistantMsg);
+      const explicitAsk = [
+        /\bshall i (proceed|continue|begin|execute|transfer|withdraw|deposit|send|dispatch|fire)\b/i,
+        /\bshould i (proceed|continue|begin|execute|transfer|withdraw|deposit|send|dispatch|fire)\b/i,
+        /\bwould you like me to\b/i,
+        /\bdo you want me to\b/i,
+        /\b(awaiting|await) (your )?(order|confirmation|approval|command|go-ahead)\b/i,
+        /\bon your order,?\s*(commander)?\b/i,
+        /\blet me know (if|when) (you|to)\b/i,
+        /\bplease (confirm|advise|approve)\b/i
+      ].some((re) => re.test(lastAssistantMsg));
+      const isAskingForApproval = endsWithQuestion || explicitAsk;
       const lastUserMsg = [...msgs].reverse().find((m) => m && /USER[:\s]/i.test(m));
       const userAlreadyReplied = lastUserMsg && msgs.indexOf(lastUserMsg) > msgs.indexOf(lastAssistantMsg);
-      if (isQuestion && !userAlreadyReplied) {
+      if (isAskingForApproval && !userAlreadyReplied) {
         const key = `auto-confirm:${lastAssistantMsg.slice(0, 60)}`;
         if (!state.seenEventKeys.has(key)) {
           state.seenEventKeys.add(key);

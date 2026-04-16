@@ -9,6 +9,7 @@ const DEFAULT_CONFIG = {
   rescueCooldownSec: 90,
   safeMode: true,
   isCeo: false,
+  troubleMaker: false,
   maxDecisionsPerTick: 2,
   homeHub: 1413,
   dispatchMinWarp: 200,
@@ -259,6 +260,11 @@ export const AutopilotPanel = () => {
                 onChange={(e) => setConfig({ ...config, isCeo: e.target.checked })} />
               I am CEO
             </label>
+            <label className="flex items-center gap-1 text-fuchsia-300 font-semibold">
+              <input type="checkbox" checked={config.troubleMaker ?? false}
+                onChange={(e) => setConfig({ ...config, troubleMaker: e.target.checked })} />
+              troublemaker
+            </label>
             {Object.keys(config.enabled).map((k) => (
               <label key={k} className="flex items-center gap-1 text-slate-400">
                 <input type="checkbox" checked={config.enabled[k]}
@@ -272,6 +278,9 @@ export const AutopilotPanel = () => {
           </div>
           <div className="text-[10px] text-rose-400/70 -mt-0.5">
             CEO: autopilot manages every corp ship (shared task slots). Off = primary ship only — prevents colliding with other corp members' dispatches.
+          </div>
+          <div className="text-[10px] text-fuchsia-400/70 -mt-0.5">
+            Troublemaker: primary leaves fedspace, hunts salvage, engages combat, trades only for fuel. Banks down to 1,000 on-hand before each run; refuels at home hub between runs.
           </div>
           <div className="text-slate-500 text-[10px]">
             Changes take effect on next Start. Stop + Start to apply.

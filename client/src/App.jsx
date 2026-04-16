@@ -69,7 +69,9 @@ export default function App() {
   };
 
   const handleUntrack = async (id) => {
-    if (!confirm('Remove this mission from tracking? No stop command will be sent to the game agent.')) return;
+    // Confirmation is handled by the caller (double-click-arm pattern) —
+    // window.confirm is banned by project convention and has a focus-loss
+    // bug where the native dialog pulses away before the user can click.
     await api.untrackMission(id);
     if (selectedId === id) setSelectedId(null);
     await refresh();
