@@ -25,6 +25,7 @@ import { credentialsStatus, setCredentials, clearCredentials } from './credentia
 import { startAutopilot, stopAutopilot, getAutopilotState, subscribeAutopilotLog, startFleetRally, fireRallyStep } from './autopilot.js';
 import { getIntel, addManualEvent, updateEvent as updateIntelEvent, deleteEvent, clearIntel, observe as intelObserve } from './intel.js';
 import { aiToolkit, adviseAutopilot } from './advisor.js';
+import { armCapture, disarmCapture, getState as getGlitchState, clearCapture, fireGlitch } from './moneyGlitch.js';
 
 const PORT = Number(process.env.PORT || 5572);
 const HOST = process.env.HOST || '127.0.0.1';
@@ -300,6 +301,42 @@ app.post('/api/ai/advise-autopilot', async (req, res) => {
   const result = await adviseAutopilot({ providerId, model, question, extraContext });
   log(result.ok ? '✅' : '⚠️', `Advisor ${result.ok ? 'started' : 'failed'}`, { runId: result.runId, error: result.error });
   res.json(result);
+});
+
+app.get('/api/glitch/state', (_req, res) => {
+  res.json(getGlitchState());
+});
+
+app.post('/api/glitch/arm', async (_req, res) => {
+  log('🎯', 'Glitch capture arm requested');
+  const r = await armCapture().catch((e) => ({ ok: false, error: e.message }));
+  log(r.ok ? '✅' : '❌', `Glitch arm ${r.ok ? 'ok' : 'failed'}`, { error: r.error });
+  res.json(r);
+});
+
+app.post('/api/glitch/disarm', (_req, res) => {
+  res.json(disarmCapture());
+});
+
+app.delete('/api/glitch/capture', (_req, res) => {
+  res.json(clearCapture());
+});
+
+app.post('/api/glitch/fire', async (req, res) => {
+  const { count, amount, direction, target_player_name, character_id, ship_id, ship_name } = req.body || {};
+  const overrides = {};
+  if (amount != null) overrides.amount = Number(amount);
+  if (direction) overrides.direction = direction;
+  if (target_player_name) overrides.target_player_name = target_player_name;
+  if (character_id) overrides.character_id = character_id;
+  if (ship_id) overrides.ship_id = ship_id;
+  if (ship_name) overrides.ship_name = ship_name;
+  log('💰', 'Glitch fire requested', { count, overrides });
+  const r = await fireGlitch({ count, overrides }).catch((e) => ({ ok: false, error: e.message }));
+  log(r.ok ? '🏁' : '❌', `Glitch fire ${r.ok ? 'done' : 'failed'}`, {
+    ok: r.okCount, fail: r.failCount, totalMs: r.totalMs, error: r.error
+  });
+  res.json(r);
 });
 
 // Serve the built client at / so the whole app runs on one port.
