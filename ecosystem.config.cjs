@@ -19,7 +19,7 @@ module.exports = {
       env: {
         NODE_ENV: 'development',
         TZ: 'UTC',
-        PORT: 5570,
+        PORT: 5572,
         HOST: '127.0.0.1',
         CDP_ENDPOINT: 'http://127.0.0.1:5556',
         GAME_URL: 'https://game.gradient-bang.com'
@@ -34,7 +34,7 @@ module.exports = {
       env: {
         NODE_ENV: 'development',
         TZ: 'UTC',
-        VITE_API_URL: 'http://127.0.0.1:5570'
+        VITE_API_URL: 'http://127.0.0.1:5572'
       }
     }
   ]

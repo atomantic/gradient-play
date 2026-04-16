@@ -4,7 +4,7 @@ Express + React + Tailwind companion app that drives the in-game AI assistant on
 
 ## Status: v0.1 — scaffolded and verified end-to-end
 
-- Server: express on :5570, Playwright `connectOverCDP` → :5556 (PortOS browser)
+- Server: express on :5572, Playwright `connectOverCDP` → :5556 (PortOS browser)
 - Client: vite + react + tailwind on :5571
 - Snapshot reader pulls ships (name, sector, warp, fighters, shields, credits), bank + on-hand credits, last chat messages
 - Mission engine: periodic tick loop → build prompt from goal + guardrails + live state → type into `input[data-slot="input"][placeholder="Enter command"]` + Enter; 2.1s throttle respects in-game limit; abort/stop condition rows (metric/op/value)
@@ -16,13 +16,15 @@ Express + React + Tailwind companion app that drives the in-game AI assistant on
 
 ```bash
 cd /Users/antic/github.com/atomantic/gradient-play
-npm run install:all    # one-time
-npm run dev            # starts server + client in parallel
+npm run setup          # one-time: installs deps, seeds .env, builds client
+npm start              # serves UI + API on a single port (5572)
+# dev with HMR:
+npm run dev            # server + vite in parallel (UI :5571, API :5572)
 # or:
 npm run pm2:start      # for PortOS-style managed run
 ```
 
-UI: http://localhost:5571  ·  API: http://localhost:5570
+Single-port: http://localhost:5572/   ·   Dev UI: http://localhost:5571/
 
 ## Next
 

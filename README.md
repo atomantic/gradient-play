@@ -18,7 +18,7 @@ Corp-scale play is where the companion earns its keep — autonomous Light Haule
 
 ```
 ┌────────────────────────────┐    CDP / Playwright    ┌─────────────────────────┐
-│  Chrome (Portos browser)   │◀──────────────────────▶│  server (Express :5570) │
+│  Chrome (Portos browser)   │◀──────────────────────▶│  server (Express :5572) │
 │  — game.gradient-bang.com  │    :5556               │  — mission engine       │
 └────────────────────────────┘                        │  — snapshot adapter     │
                                                       │  — credential store     │
@@ -52,17 +52,18 @@ Corp-scale play is where the companion earns its keep — autonomous Light Haule
 ```bash
 git clone git@github.com:atomantic/gradient-play.git
 cd gradient-play
-npm run install:all     # installs root, server, client
-cp .env.example .env    # only if you need non-default CDP / game URLs
+npm run setup           # installs deps, seeds .env, builds the client
+npm start               # serves UI + API on one port
+# open http://127.0.0.1:5572/
 ```
 
-Point the companion at your CDP endpoint if it isn't the default:
+Tweak `.env` if your CDP endpoint or ports differ from the defaults:
 
 ```bash
 # .env
 CDP_ENDPOINT=http://127.0.0.1:5556
 GAME_URL=https://game.gradient-bang.com
-PORT=5570               # API
+PORT=5572               # UI + API on this port
 HOST=127.0.0.1
 ```
 
@@ -70,12 +71,19 @@ HOST=127.0.0.1
 
 ## Running
 
-**Dev (watch both processes):**
+**Production-ish (single port, serves built client + API):**
+
+```bash
+npm start
+# everything: http://127.0.0.1:5572/
+```
+
+**Dev (watch both processes, HMR for UI):**
 
 ```bash
 npm run dev
-# api:  http://localhost:5570
-# ui:   http://localhost:5571
+# api:  http://localhost:5572
+# ui:   http://localhost:5571   ← open this one in dev mode
 ```
 
 **PM2 (matches PortOS conventions):**
@@ -100,12 +108,12 @@ The in-game login is stored locally; the companion fills it in when the login sc
 Set or update credentials from the UI (Credentials panel) or the API:
 
 ```bash
-curl -X POST http://127.0.0.1:5570/api/credentials \
+curl -X POST http://127.0.0.1:5572/api/credentials \
   -H 'Content-Type: application/json' \
   -d '{"email":"you@example.com","password":"..."}'
 
-curl -X POST http://127.0.0.1:5570/api/cdp/login   # auto-fill login form
-curl -X DELETE http://127.0.0.1:5570/api/credentials
+curl -X POST http://127.0.0.1:5572/api/cdp/login   # auto-fill login form
+curl -X DELETE http://127.0.0.1:5572/api/credentials
 ```
 
 ---
