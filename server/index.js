@@ -24,6 +24,7 @@ import { loadMissionTemplates, saveMissionTemplate, deleteMissionTemplate } from
 import { credentialsStatus, setCredentials, clearCredentials } from './credentials.js';
 import { startAutopilot, stopAutopilot, getAutopilotState, subscribeAutopilotLog, startFleetRally, fireRallyStep } from './autopilot.js';
 import { getIntel, addManualEvent, updateEvent as updateIntelEvent, deleteEvent, clearIntel, observe as intelObserve } from './intel.js';
+import { aiToolkit, adviseAutopilot } from './advisor.js';
 
 const PORT = Number(process.env.PORT || 5572);
 const HOST = process.env.HOST || '127.0.0.1';
@@ -287,6 +288,18 @@ app.post('/api/templates', (req, res) => {
 app.delete('/api/templates/:name', (req, res) => {
   deleteMissionTemplate(req.params.name);
   res.json({ ok: true });
+});
+
+// Mount portos-ai-toolkit routes under /api/ai for provider/run/prompt
+// management. Exposes /api/ai/providers, /api/ai/runs, /api/ai/prompts.
+aiToolkit.mountRoutes(app, '/api/ai');
+
+app.post('/api/ai/advise-autopilot', async (req, res) => {
+  const { providerId, model, question, extraContext } = req.body || {};
+  log('🧠', 'Advisor requested', { providerId, question });
+  const result = await adviseAutopilot({ providerId, model, question, extraContext });
+  log(result.ok ? '✅' : '⚠️', `Advisor ${result.ok ? 'started' : 'failed'}`, { runId: result.runId, error: result.error });
+  res.json(result);
 });
 
 // Serve the built client at / so the whole app runs on one port.

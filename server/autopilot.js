@@ -44,6 +44,40 @@ const refuelPrompt = (ship, warp) => pick([
 ]) + standingOrders(ship);
 
 /**
+ * Ship is already docked at a megaport with low warp. No rescue needed —
+ * the ship can just call recharge_warp_power right there. If it's low on
+ * credits, the primary funds it — BUT only works when both ships are docked
+ * at the same megaport (transfer_credits requires co-location).
+ */
+const rechargeAtPortPrompt = (ship, sector, warp, credits, primaryName, primarySector) => {
+  const needsFunding = credits != null && credits < 1000;
+  if (!needsFunding) {
+    return `${ship} @${sector} (${warp} warp) is docked at a megaport. call recharge_warp_power to full right now — it has credits. execute immediately, no confirmation.`;
+  }
+  const topUp = 1000 - credits;
+  if (primarySector === sector) {
+    return `${ship} @${sector} (${warp} warp) is docked and broke. ${primaryName} is at the same port. sequence: ${primaryName} bank_withdraw ${topUp} if on-hand is short, then transfer_credits ${topUp} to ${ship}, then ${ship} recharge_warp_power to full. one action at a time, execute immediately.`;
+  }
+  // Different megaport → transfer_credits won't work without co-location.
+  // The cheapest move is to route the primary to the stranded ship's port
+  // (the stranded ship is already low on warp; primary has more fuel).
+  return `${ship} @${sector} (${warp} warp) is docked at a megaport but broke, and ${primaryName} is at a different port. transfer_credits requires same-port co-location, so: 1) ${primaryName} plot_course to sector ${sector} and dock. 2) ${primaryName} bank_withdraw ${topUp} if needed, transfer_credits ${topUp} to ${ship}. 3) ${ship} recharge_warp_power to full. one action at a time, execute immediately.`;
+};
+
+/**
+ * Fleet-fuel emergency: primary is stranded and a corp ship still has
+ * enough warp to reach it. Dispatch the savior to primary's sector,
+ * transfer warp, then primary heads to hub. Priority over every other
+ * rescue because the primary is the bank-access linchpin — once it's
+ * fueled and docked it can fund and refuel every stranded corp ship.
+ */
+const primaryReviveDispatchPrompt = (savior, saviorWarp, primary, primarySector, primaryWarp) => {
+  const loc = primarySector != null ? `@${primarySector}` : `(exact sector unknown, use plot_course with the primary as target)`;
+  const hub = homeHub();
+  return `PRIMARY FUEL EMERGENCY. ${savior} (${saviorWarp} warp) is the only ship with enough fuel to reach the primary. sequence: 1) ${savior} plot_course to primary ${primary} ${loc}. 2) ${savior} transfer_warp_power ${Math.min(200, Math.floor(saviorWarp / 2))} to ${primary}. 3) ${primary} plot_course to hub ${hub} and dock. 4) ${primary} recharge_warp_power. queue one at a time, execute immediately, no confirmation.`;
+};
+
+/**
  * Stranded / near-stranded ship: warp too low to reliably reach a megaport.
  * Ask the agent to transfer_warp_power from a nearby corpmate before the
  * ship drains to 0 and is stuck for good. Short cooldown — this is urgent.
@@ -174,7 +208,9 @@ const state = {
   lastSnapshot: null,
   subscribers: new Set(),
   plans: new Map(), // ship name → active plan (one at a time per ship)
-  prevWarp: new Map() // ship name → last-tick warp, used to detect in-flight ships
+  prevWarp: new Map(), // ship name → last-tick warp, used to detect in-flight ships
+  stuckTicks: 0,       // consecutive ticks with ≥2 ships at critical warp — triggers AI advisor
+  lastAdvisorAt: 0     // ms timestamp of last advisor dispatch (30-min cooldown)
 };
 
 /**
@@ -396,16 +432,60 @@ const decide = (snapshot) => {
   const refuelerAvailable = refueler && refueler.active === false
     && refueler.warpPower != null
     && refueler.warpPower >= Math.max(cfg.minWarp, 100);
+  const megaportSet = new Set(megaportSectors());
+  const primaryShip = ships.find((s) => s.primary);
+  const primaryName = primaryShip?.name || 'the primary ship';
+
+  // PRIMARY FUEL EMERGENCY. If the primary is at/below critical warp, saving
+  // it takes priority over every other rescue: the primary has bank access
+  // and is the only ship that can fund the rest of the fleet for recharges.
+  // Pick the most-fueled corp ship with enough warp to reach the primary
+  // (conservative threshold: 2× criticalWarp + a 100-warp buffer), dispatch
+  // it to transfer_warp_power to primary, then primary heads to hub.
+  if (cfg.enabled.refuel && primaryShip && primaryShip.warpPower != null
+      && primaryShip.warpPower < cfg.fuelCriticalWarp
+      && !hasPlan(primaryShip.name)) {
+    const MIN_SAVIOR_WARP = Math.max(200, cfg.fuelCriticalWarp * 2 + 100);
+    const savior = ships
+      .filter((c) => !c.primary && c.warpPower != null && c.warpPower >= MIN_SAVIOR_WARP && !hasPlan(c.name))
+      .sort((a, b) => (b.warpPower || 0) - (a.warpPower || 0))[0];
+    if (savior) {
+      const key = `primary-revive:${primaryShip.name}`;
+      if (canAct(key, cfg.rescueCooldownSec * 1000)) {
+        pushInteractive({
+          key,
+          ship: savior.name,
+          text: primaryReviveDispatchPrompt(savior.name, savior.warpPower, primaryShip.name, primaryShip.sector, primaryShip.warpPower)
+        });
+      }
+    }
+    // Either way, skip other rescue logic for the primary this tick — the
+    // emergency prompt above owns its revival. Continue with corp-ship fuel
+    // guards below (ships at hub can still self-recharge).
+  }
 
   for (const s of ships) {
     if (!cfg.enabled.refuel) continue;
     if (s.warpPower == null) continue;
     if (hasPlan(s.name)) continue; // plan owns this ship's next action
     if (!ceo && !s.primary) continue; // non-CEO: don't touch corp ships
+    // Primary emergency already handled above — don't double-prompt it.
+    if (s.primary && s.warpPower < cfg.fuelCriticalWarp) continue;
     if (s.warpPower < cfg.fuelCriticalWarp) {
-      // Stranded. transfer_warp_power is a single interactive call — doesn't
-      // need a task slot. Refueler dispatch *is* a multi-step trip (route →
-      // transfer → return) so it takes a slot.
+      // FAST PATH: ship is already docked at a megaport. No rescue needed —
+      // just recharge in place (primary funds it first if broke). This avoids
+      // the stuck-at-hub-begging-for-a-corpmate-rescue loop seen in overnight
+      // logs when most of the fleet is simultaneously dry.
+      if (s.sector != null && megaportSet.has(s.sector)) {
+        const key = `recharge-at-port:${s.name}`;
+        if (canAct(key, cfg.rescueCooldownSec * 1000)) {
+          pushInteractive({ key, ship: s.name, text: rechargeAtPortPrompt(s.name, s.sector, s.warpPower, s.credits, primaryName, primaryShip?.sector) });
+        }
+        continue;
+      }
+      // Stranded in space. transfer_warp_power is a single interactive call —
+      // doesn't need a task slot. Refueler dispatch *is* a multi-step trip
+      // (route → transfer → return) so it takes a slot.
       const targetIsRefueler = refueler && s.name === refueler.name;
       if (refuelerAvailable && !targetIsRefueler) {
         const key = `refueler-dispatch:${s.name}`;
@@ -413,9 +493,17 @@ const decide = (snapshot) => {
           pushTaskDecision({ key, ship: refueler.name, text: refuelerDispatchPrompt(refueler.name, s.name, s.sector, s.warpPower) });
         }
       } else {
-        const key = `rescue:${s.name}`;
-        if (canAct(key, cfg.rescueCooldownSec * 1000)) {
-          pushInteractive({ key, ship: s.name, text: rescueStrandedPrompt(s.name, s.sector, s.warpPower) });
+        // No dedicated refueler available. Only fire the rescue prompt when
+        // at least one corpmate still has enough warp to help — otherwise the
+        // prompt is a no-op that confuses the agent (the overnight failure
+        // mode: 5 of 6 ships dry, no corpmate to transfer from).
+        const anyCorpmateFueled = ships.some((c) => !c.primary && c.name !== s.name
+          && c.warpPower != null && c.warpPower >= Math.max(200, cfg.minWarp * 2));
+        if (anyCorpmateFueled) {
+          const key = `rescue:${s.name}`;
+          if (canAct(key, cfg.rescueCooldownSec * 1000)) {
+            pushInteractive({ key, ship: s.name, text: rescueStrandedPrompt(s.name, s.sector, s.warpPower) });
+          }
         }
       }
     } else {
@@ -508,7 +596,12 @@ const decide = (snapshot) => {
     if (remainingSlots <= 0) break;
     if (!cfg.enabled.explore) break;
     if (hasPlan(probe.name)) continue;
-    if (probeRole(probe.name) === 'refueler' && needsRescue) continue;
+    // Refueler probe is rescue-only: never dispatch it on generic exploration
+    // (that would pull it out of federation space and out of rescue range).
+    // It stays parked at hub until the rescue flow needs it — at which point
+    // refuelerDispatchPrompt sends it out, and it may leave fedspace just long
+    // enough to reach the stranded ship, then returns.
+    if (probeRole(probe.name) === 'refueler') continue;
     // Fund first if at hub and broke — probes don't generally carry credits
     // but may need some for recharge_warp_power on return trips.
     if (needsFunding(probe)) {
@@ -624,7 +717,10 @@ const decide = (snapshot) => {
       primary &&
       !primaryHasTask &&
       primary.warpPower != null &&
-      primary.warpPower >= cfg.minWarp &&
+      // Use dispatchMinWarp (~200) not minWarp (~50): at 50 warp the primary
+      // could start a trade loop and strand itself mid-hop before returning
+      // to refuel. 200 gives comfortable round-trip headroom.
+      primary.warpPower >= (cfg.dispatchMinWarp ?? cfg.minWarp) &&
       !hasPlan(primary.name)
     ) {
       const key = cfg.troubleMaker ? 'primary:troublemaker' : 'primary:trade';
@@ -788,6 +884,28 @@ const runTick = async () => {
     // Record current warp per ship so next tick can detect in-flight movement.
     for (const s of (snapshot?.extracted?.ships || [])) {
       if (s.name && s.warpPower != null) state.prevWarp.set(s.name, s.warpPower);
+    }
+
+    // Deadlock detector: if ≥2 ships stay at critical warp for ≥5 consecutive
+    // ticks, fire an AI advisor run to suggest a recovery plan. 30-minute
+    // cooldown on the dispatch so we don't spam the LLM.
+    const criticalCount = (snapshot?.extracted?.ships || [])
+      .filter((s) => s.warpPower != null && s.warpPower < state.config.fuelCriticalWarp).length;
+    if (criticalCount >= 2) state.stuckTicks += 1;
+    else state.stuckTicks = 0;
+    const STUCK_THRESHOLD = 5;
+    const ADVISOR_COOLDOWN_MS = 30 * 60 * 1000;
+    if (state.stuckTicks >= STUCK_THRESHOLD && Date.now() - state.lastAdvisorAt > ADVISOR_COOLDOWN_MS) {
+      state.lastAdvisorAt = Date.now();
+      state.stuckTicks = 0; // reset so we don't re-fire every tick
+      // Dynamic import avoids an autopilot ↔ advisor circular dependency.
+      import('./advisor.js').then(({ adviseAutopilot }) =>
+        adviseAutopilot({
+          question: `Fleet has ${criticalCount} ships at critical warp for ${STUCK_THRESHOLD}+ consecutive ticks — looks like a fuel/credit deadlock the rescue loop can't resolve. Suggest a recovery sequence.`
+        })
+          .then((r) => appendLog({ type: 'event', intelType: 'advisor-dispatched', snippet: r.ok ? `runId=${r.runId} provider=${r.providerId} model=${r.model}` : `failed: ${r.error}`, runId: r.runId, providerId: r.providerId }))
+          .catch((e) => appendLog({ type: 'error', error: `advisor dispatch failed: ${e.message}` }))
+      );
     }
 
     const corpActiveCount = (snapshot?.extracted?.ships || []).filter((s) => !s.primary && s.active === true).length;
