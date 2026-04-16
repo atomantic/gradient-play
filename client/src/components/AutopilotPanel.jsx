@@ -8,6 +8,7 @@ const DEFAULT_CONFIG = {
   refuelCooldownSec: 180,
   rescueCooldownSec: 90,
   safeMode: true,
+  isCeo: false,
   maxDecisionsPerTick: 2,
   homeHub: 1413,
   dispatchMinWarp: 200,
@@ -253,6 +254,11 @@ export const AutopilotPanel = () => {
                 onChange={(e) => setConfig({ ...config, safeMode: e.target.checked })} />
               safe mode
             </label>
+            <label className="flex items-center gap-1 text-rose-300 font-semibold">
+              <input type="checkbox" checked={config.isCeo ?? false}
+                onChange={(e) => setConfig({ ...config, isCeo: e.target.checked })} />
+              I am CEO
+            </label>
             {Object.keys(config.enabled).map((k) => (
               <label key={k} className="flex items-center gap-1 text-slate-400">
                 <input type="checkbox" checked={config.enabled[k]}
@@ -263,6 +269,9 @@ export const AutopilotPanel = () => {
           </div>
           <div className="text-[10px] text-amber-400/70 -mt-0.5">
             Safe mode: non-probe ships stay in federation space. Probes may venture further.
+          </div>
+          <div className="text-[10px] text-rose-400/70 -mt-0.5">
+            CEO: autopilot manages every corp ship (shared task slots). Off = primary ship only — prevents colliding with other corp members' dispatches.
           </div>
           <div className="text-slate-500 text-[10px]">
             Changes take effect on next Start. Stop + Start to apply.

@@ -131,6 +131,7 @@ const DEFAULTS = {
   megaports: [305, 472, 1413],      // known mega-port sectors — add more as probes discover them
   homeHub: 1413,                    // preferred dock for fuel/banking — the fleet's home base
   safeMode: true,                  // restrict non-probe ships to federation space
+  isCeo: false,                    // only CEO can manage corp ships; non-CEO autopilot only drives the primary
   maxDecisionsPerTick: 2,          // never fire more than N prompts in one tick — avoids flooding the agent
   enabled: {
     refuel: true,
@@ -325,6 +326,11 @@ const decide = (snapshot) => {
   const out = [];
   const cooldownMs = cfg.decisionCooldownSec * 1000;
   const hasPlan = (name) => state.plans.has(name);
+  // CEO mode: only when the user is the corporation's CEO should autopilot
+  // manage corp ships. Task slots are shared across all corp members — if two
+  // CEOs (or a non-CEO) fire dispatches, they trample each other. Default
+  // off; flip on from the UI.
+  const ceo = !!cfg.isCeo;
 
   // When a fleet-wide rally plan is running, it owns every ship — skip all
   // per-ship decisions so we don't interfere with the coordinated operation.
@@ -375,6 +381,7 @@ const decide = (snapshot) => {
     if (!cfg.enabled.refuel) continue;
     if (s.warpPower == null) continue;
     if (hasPlan(s.name)) continue; // plan owns this ship's next action
+    if (!ceo && !s.primary) continue; // non-CEO: don't touch corp ships
     if (s.warpPower < cfg.fuelCriticalWarp) {
       // Stranded. transfer_warp_power is a single interactive call — doesn't
       // need a task slot. Refueler dispatch *is* a multi-step trip (route →
@@ -425,6 +432,10 @@ const decide = (snapshot) => {
   //   - Fill remaining corp slots with haulers on fedspace+adjacent trade loops.
   //   - Kestrel (primary) gets a separate periodic fedspace-trade dispatch below,
   //     occupying the local task engine slot.
+  //
+  // Non-CEO: skip all corp-ship dispatch. Task slots are shared across the
+  // corporation; only the CEO should be allocating them.
+  const skipCorpWork = !ceo;
   const corpShips = ships.filter((s) => !s.primary);
   const activeCorp = corpShips.filter((s) => s.active === true);
   // Idle ships must have enough warp to meaningfully execute a new task AND
@@ -472,6 +483,7 @@ const decide = (snapshot) => {
     !hasPlan(s.name);
 
   for (const probe of allIdleProbes) {
+    if (skipCorpWork) break;
     if (probesSent >= probeTarget) break;
     if (remainingSlots <= 0) break;
     if (!cfg.enabled.explore) break;
@@ -506,6 +518,7 @@ const decide = (snapshot) => {
   let tradesSent = activeTradeCount;
 
   for (const hauler of idleHaulers) {
+    if (skipCorpWork) break;
     if (tradesSent >= tradeTarget) break;
     if (remainingSlots <= 0) break;
     if (!cfg.enabled.trade) break;
@@ -542,8 +555,9 @@ const decide = (snapshot) => {
     }
 
     // Per-corp-ship sweep: each ship gets its own cooldown so we can nag any
-    // cash-heavy ship independently of the others.
+    // cash-heavy ship independently of the others. Only when CEO.
     for (const s of ships) {
+      if (skipCorpWork) break;
       if (s.primary) continue; // primary is handled by the player on-hand branch above
       if (s.credits == null) continue;
       if (hasPlan(s.name)) continue;
