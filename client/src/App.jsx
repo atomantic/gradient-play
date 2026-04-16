@@ -11,7 +11,6 @@ import { ShipRoles } from './components/ShipRoles.jsx';
 import { CredentialsPanel } from './components/CredentialsPanel.jsx';
 import { AutopilotPanel } from './components/AutopilotPanel.jsx';
 import { IntelPanel } from './components/IntelPanel.jsx';
-import { MoneyGlitchPanel } from './components/MoneyGlitchPanel.jsx';
 
 const RECONNECT_THROTTLE_MS = 15_000;
 
@@ -22,7 +21,7 @@ export default function App() {
   const [selectedId, setSelectedId] = useState(null);
   const [templates, setTemplates] = useState([]);
   const [error, setError] = useState(null);
-  const [rightTab, setRightTab] = useState('mission'); // 'mission' | 'autopilot' | 'intel' | 'glitch'
+  const [rightTab, setRightTab] = useState('mission'); // 'mission' | 'autopilot' | 'intel'
   const lastReconnectAt = React.useRef(0);
 
   const refresh = async () => {
@@ -137,20 +136,14 @@ export default function App() {
               className={`px-3 py-1 rounded-t border-b-2 ${rightTab === 'intel' ? 'border-rose-500 text-rose-300' : 'border-transparent text-slate-500 hover:text-slate-300'}`}>
               Intel
             </button>
-            <button onClick={() => setRightTab('glitch')}
-              className={`px-3 py-1 rounded-t border-b-2 ${rightTab === 'glitch' ? 'border-fuchsia-500 text-fuchsia-300' : 'border-transparent text-slate-500 hover:text-slate-300'}`}>
-              Glitch
-            </button>
           </div>
           <div className="flex-1 min-h-0">
             {rightTab === 'mission' ? (
               <MissionDetail missionId={selectedId} onAbort={handleAbort} onUntrack={handleUntrack} />
             ) : rightTab === 'autopilot' ? (
               <AutopilotPanel />
-            ) : rightTab === 'intel' ? (
-              <IntelPanel />
             ) : (
-              <MoneyGlitchPanel />
+              <IntelPanel />
             )}
           </div>
         </section>

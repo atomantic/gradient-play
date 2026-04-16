@@ -66,8 +66,6 @@ const withPage = async () => {
   return state.page;
 };
 
-export const getPage = withPage;
-
 export const getConnectionStatus = async () => {
   const connected = !!(state.page && !state.page.isClosed() && state.browser?.isConnected());
   return {

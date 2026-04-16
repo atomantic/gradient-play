@@ -25,12 +25,7 @@ export const api = {
   untrackMission: (id) => req('DELETE', `/api/missions/${id}`),
   templates: () => req('GET', '/api/templates'),
   saveTemplate: (name, spec) => req('POST', '/api/templates', { name, spec }),
-  deleteTemplate: (name) => req('DELETE', `/api/templates/${encodeURIComponent(name)}`),
-  glitchState: () => req('GET', '/api/glitch/state'),
-  glitchArm: () => req('POST', '/api/glitch/arm'),
-  glitchDisarm: () => req('POST', '/api/glitch/disarm'),
-  glitchClearCapture: () => req('DELETE', '/api/glitch/capture'),
-  glitchFire: (body) => req('POST', '/api/glitch/fire', body)
+  deleteTemplate: (name) => req('DELETE', `/api/templates/${encodeURIComponent(name)}`)
 };
 
 export const streamMission = (id, { onLog, onSnapshot, onError } = {}) => {
