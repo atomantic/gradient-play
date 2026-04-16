@@ -210,7 +210,12 @@ const state = {
   plans: new Map(), // ship name → active plan (one at a time per ship)
   prevWarp: new Map(), // ship name → last-tick warp, used to detect in-flight ships
   stuckTicks: 0,       // consecutive ticks with ≥2 ships at critical warp — triggers AI advisor
-  lastAdvisorAt: 0     // ms timestamp of last advisor dispatch (30-min cooldown)
+  lastAdvisorAt: 0,    // ms timestamp of last advisor dispatch (30-min cooldown)
+  // User-issued travel intents: ship name → { sector, issuedAt, msgTs }.
+  // The game caps autonomous tasks at 100 steps, so a ship routing to a distant
+  // sector will halt mid-transit. If the user told us where it was going, we
+  // auto-reissue a continue directive on task-max-steps until the ship arrives.
+  travelIntents: new Map()
 };
 
 /**
@@ -279,6 +284,37 @@ const parseAssistantEvents = (snapshot) => {
     }
   }
   return events;
+};
+
+// Matches user directives like "send X to sector 1413", "route refueler to 305",
+// "continue hauler toward 1413", "move probe to 472". Captures the ship-role
+// phrase (possibly multi-ship: "refueler and explorer") and the sector number.
+const TRAVEL_INTENT_RE = /(?:send|route|move|continue|dispatch|head)\s+(?:the\s+)?([a-z0-9,\s&-]+?)\s+(?:back\s+)?(?:to|toward|towards)\s+(?:sector\s+)?(\d{2,5})\b/i;
+
+const parseTravelIntents = (snapshot) => {
+  const msgs = snapshot?.extracted?.lastMessages || [];
+  const ships = snapshot?.extracted?.ships || [];
+  const intents = [];
+  for (const m of msgs) {
+    if (!m) continue;
+    if (!/USER[:\s]/i.test(m)) continue;
+    const match = m.match(TRAVEL_INTENT_RE);
+    if (!match) continue;
+    const sector = parseInt(match[2], 10);
+    if (!Number.isFinite(sector)) continue;
+    const tsMatch = m.match(/\[(\d{2}:\d{2}:\d{2})\]/);
+    const msgTs = tsMatch ? tsMatch[1] : null;
+    const roles = match[1].split(/,\s*|\s+and\s+|\s*&\s*/i).map((s) => s.trim()).filter(Boolean);
+    for (const role of roles) {
+      const ship = matchShipByRole(role, ships);
+      if (!ship) continue;
+      const key = `travel-intent:${ship.name}:${sector}:${msgTs || m.slice(0, 40)}`;
+      if (state.seenEventKeys.has(key)) continue;
+      state.seenEventKeys.add(key);
+      intents.push({ ship: ship.name, sector, msgTs, roleWord: role });
+    }
+  }
+  return intents;
 };
 
 const appendLog = (entry) => {
@@ -832,6 +868,24 @@ const runTick = async () => {
       appendLog({ type: 'intel', intelType: ev.type, ship: ev.ship, attacker: ev.attacker, sector: ev.sector });
     }
 
+    // Track user travel directives ("send X to 1413", "continue X toward 305")
+    // so we can auto-reissue on task-max-steps — the game caps any autonomous
+    // task at 100 steps, so long-haul travel halts mid-transit.
+    const shipsNow = snapshot?.extracted?.ships || [];
+    const newIntents = parseTravelIntents(snapshot);
+    for (const t of newIntents) {
+      state.travelIntents.set(t.ship, { sector: t.sector, issuedAt: Date.now(), msgTs: t.msgTs });
+      appendLog({ type: 'event', intelType: 'travel-intent', ship: t.ship, sector: t.sector, roleWord: t.roleWord });
+    }
+    // Fulfilled → drop the intent.
+    for (const [name, intent] of state.travelIntents) {
+      const s = shipsNow.find((x) => x.name === name);
+      if (s && s.sector === intent.sector) {
+        state.travelIntents.delete(name);
+        appendLog({ type: 'event', intelType: 'travel-intent-fulfilled', ship: name, sector: intent.sector });
+      }
+    }
+
     // Chat-event scan: if the assistant reported "task ended after max steps"
     // (or similar) for a specific ship, clear that ship's cooldown keys so
     // decide() re-dispatches on this same tick. For the primary ship, also
@@ -844,6 +898,27 @@ const runTick = async () => {
       }
       if (ev.isPrimary) {
         state.lastDecisionAt.delete('primary:trade');
+      }
+      // Auto-resume travel: 100-step cap halted the ship mid-transit. If we
+      // tracked the user's destination and the ship isn't there yet, reissue.
+      if (ev.type === 'task-max-steps' || ev.type === 'task-aborted') {
+        const intent = state.travelIntents.get(ev.ship);
+        if (intent) {
+          const s = shipsNow.find((x) => x.name === ev.ship);
+          const arrived = s && s.sector === intent.sector;
+          if (arrived) {
+            state.travelIntents.delete(ev.ship);
+            appendLog({ type: 'event', intelType: 'travel-intent-fulfilled', ship: ev.ship, sector: intent.sector });
+          } else {
+            const key = `travel-resume:${ev.ship}:${intent.sector}:${ev.msgTs || Date.now()}`;
+            if (!state.seenEventKeys.has(key)) {
+              state.seenEventKeys.add(key);
+              const prompt = `continue ${ev.ship} to sector ${intent.sector}, plot_course, dock on arrival, execute now`;
+              sendAssistantPrompt(prompt).catch(() => {});
+              appendLog({ type: 'event', intelType: 'auto-travel-resume', ship: ev.ship, sector: intent.sector, snippet: prompt });
+            }
+          }
+        }
       }
     }
 
