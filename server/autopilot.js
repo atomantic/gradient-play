@@ -9,7 +9,7 @@ const pick = (arr) => arr[Math.floor(Math.random() * arr.length)];
 const DEFAULT_MEGAPORTS = [305, 472, 1413];
 const megaportList = () => (state.config?.megaports || DEFAULT_MEGAPORTS).join('/');
 const megaportSectors = () => state.config?.megaports || DEFAULT_MEGAPORTS;
-const homeHub = () => state.config?.homeHub ?? DEFAULT_MEGAPORTS[0];
+const homeHub = () => state.config?.homeHub ?? DEFAULTS.homeHub;
 
 
 /**
@@ -937,8 +937,16 @@ export const startFleetRally = async (opts = {}) => {
  * Fire a single rally step as a one-shot prompt. No plan state, no nag, no
  * auto-advance — the user drives the sequence via the UI. Useful when ships
  * are already in position and the full rally would just spam the agent.
+ *
+ * Intentionally does NOT start autopilot. Autopilot's decide() loop fires
+ * independent ship-fund/dispatch prompts that collide with the one-shot
+ * rally step; running them together confuses the agent. The "execute
+ * immediately, no confirmation needed" suffix on each step prompt should
+ * keep the agent from asking for confirmation in the first place.
  */
 export const fireRallyStep = async (stepName) => {
+  if (stepName === 'fund-for-recharge') return queueFundSequence();
+  if (stepName === 'credit-balance') return queueBalanceSequence();
   const { plan, ships, error } = await buildLiveRallyPlan({ resume: true });
   if (error) return { ok: false, error };
   const step = plan.steps.find((s) => s.name === stepName);
@@ -952,6 +960,159 @@ export const fireRallyStep = async (stepName) => {
     send
   });
   return { ok: !!send.ok, step: stepName, shipCount: ships.length, send };
+};
+
+/**
+ * Fire a sequence of one-action prompts in the background, spaced apart so
+ * the agent can execute each before the next lands. Each prompt should be a
+ * single directive (one bank_withdraw, one transfer_credits, one
+ * bank_deposit, etc.) — the game executes these as distinct ship actions.
+ */
+const STEP_DELAY_MS = 12_000; // heuristic — time for the agent to complete one action
+const queueRunning = {}; // key → bool
+
+const drainQueue = (key, prompts) => {
+  queueRunning[key] = true;
+  (async () => {
+    for (let i = 0; i < prompts.length; i++) {
+      const p = prompts[i];
+      const send = await sendAssistantPrompt(p).catch((e) => ({ ok: false, error: e.message }));
+      appendLog({
+        type: 'decision',
+        key,
+        ship: FLEET_PLAN_KEY,
+        text: `[${i + 1}/${prompts.length}] ${p}`,
+        send
+      });
+      if (i < prompts.length - 1) await new Promise((r) => setTimeout(r, STEP_DELAY_MS));
+    }
+    queueRunning[key] = false;
+  })();
+};
+
+const freshSnapshot = async () => {
+  let snap = state.lastSnapshot;
+  if (!snap?.extracted) {
+    snap = await getGameSnapshot();
+    state.lastSnapshot = snap;
+  }
+  return snap;
+};
+
+/**
+ * Fund each corp ship as a separate primary-ship action. One bank_withdraw
+ * up front, then one transfer_credits per underfunded ship.
+ */
+export const queueFundSequence = async () => {
+  if (queueRunning['fund-seq']) return { ok: false, error: 'fund sequence already running' };
+  const snap = await freshSnapshot();
+  const ships = snap?.extracted?.ships || [];
+  if (ships.length === 0) return { ok: false, error: 'no ships in snapshot — is CDP connected?' };
+  const primary = ships.find((s) => s.primary);
+  const primaryName = primary?.name || 'the primary ship';
+  const onHand = snap.extracted.creditsOnHand ?? 0;
+  const keepFloor = state.config?.onHandFloor ?? 1000;
+
+  const transfers = [];
+  for (const s of ships) {
+    if (s.primary) continue;
+    if (s.credits != null && s.credits < 1000) transfers.push({ name: s.name, amount: 1000 - s.credits });
+    else if (s.credits == null) transfers.push({ name: s.name, amount: 1000 });
+  }
+  if (transfers.length === 0) return { ok: true, queued: 0, note: 'no corp ships need funding' };
+
+  const totalTransfer = transfers.reduce((sum, t) => sum + t.amount, 0);
+  const withdrawNeeded = Math.max(0, totalTransfer + keepFloor - onHand);
+
+  const prompts = [];
+  if (withdrawNeeded > 0) {
+    prompts.push(`${primaryName}: bank_withdraw ${withdrawNeeded} credits. one action, execute immediately, no confirmation.`);
+  }
+  for (const t of transfers) {
+    prompts.push(`${primaryName}: transfer_credits ${t.amount} to ${t.name}. one action, execute immediately, no confirmation.`);
+  }
+
+  drainQueue('fund-seq', prompts);
+
+  return {
+    ok: true,
+    step: 'fund-for-recharge',
+    queued: prompts.length,
+    totalTransfer,
+    withdrawNeeded,
+    transfers
+  };
+};
+
+/**
+ * Balance every corp ship to keepCredits. Queue:
+ *   1. primary bank_withdraw (if net-outgoing after sweeps)
+ *   2. each corp ship with excess: transfer_credits excess → primary
+ *   3. each corp ship below floor: primary transfer_credits topUp → ship
+ *   4. primary bank_deposits anything above its own floor
+ */
+export const queueBalanceSequence = async () => {
+  if (queueRunning['balance-seq']) return { ok: false, error: 'balance sequence already running' };
+  const snap = await freshSnapshot();
+  const ships = snap?.extracted?.ships || [];
+  if (ships.length === 0) return { ok: false, error: 'no ships in snapshot — is CDP connected?' };
+  const primary = ships.find((s) => s.primary);
+  const primaryName = primary?.name || 'the primary ship';
+  const onHand = snap.extracted.creditsOnHand ?? 0;
+  const keepCredits = state.config?.onHandFloor ?? 1000;
+
+  const sweeps = [];
+  const topUps = [];
+  const unknowns = [];
+  for (const s of ships) {
+    if (s.primary) continue;
+    if (s.credits == null) unknowns.push(s.name);
+    else if (s.credits > keepCredits) sweeps.push({ name: s.name, amount: s.credits - keepCredits });
+    else if (s.credits < keepCredits) topUps.push({ name: s.name, amount: keepCredits - s.credits });
+  }
+
+  const totalIncoming = sweeps.reduce((sum, t) => sum + t.amount, 0);
+  const totalOutgoing = topUps.reduce((sum, t) => sum + t.amount, 0);
+  // Pessimistic: assume sweeps haven't landed yet when the first top-up fires.
+  // Withdraw enough so that even before any sweep lands, primary has
+  // (totalOutgoing + keepCredits) on hand.
+  const withdrawNeeded = Math.max(0, totalOutgoing + keepCredits - onHand);
+
+  const prompts = [];
+  if (withdrawNeeded > 0) {
+    prompts.push(`${primaryName}: bank_withdraw ${withdrawNeeded} credits. one action, execute immediately, no confirmation.`);
+  }
+  for (const s of sweeps) {
+    prompts.push(`${s.name}: transfer_credits ${s.amount} to ${primaryName}. one action, execute immediately, no confirmation.`);
+  }
+  for (const t of topUps) {
+    prompts.push(`${primaryName}: transfer_credits ${t.amount} to ${t.name}. one action, execute immediately, no confirmation.`);
+  }
+  // Deposit excess only if we know primary will end with > keepCredits.
+  const projectedFinal = onHand + withdrawNeeded + totalIncoming - totalOutgoing;
+  if (projectedFinal > keepCredits) {
+    prompts.push(`${primaryName}: bank_deposit ${projectedFinal - keepCredits} credits. one action, execute immediately, no confirmation.`);
+  }
+
+  if (unknowns.length) {
+    appendLog({ type: 'decision', key: 'balance-seq', ship: FLEET_PLAN_KEY, text: `skipping unknown-balance ships (DOM scrape returned null): ${unknowns.join(', ')}` });
+  }
+
+  if (prompts.length === 0) return { ok: true, queued: 0, note: 'all corp ships already at floor' };
+
+  drainQueue('balance-seq', prompts);
+
+  return {
+    ok: true,
+    step: 'credit-balance',
+    queued: prompts.length,
+    totalIncoming,
+    totalOutgoing,
+    withdrawNeeded,
+    sweeps,
+    topUps,
+    unknowns
+  };
 };
 
 export const subscribeAutopilotLog = (fn) => {

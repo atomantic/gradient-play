@@ -147,6 +147,11 @@ export const FLEET_PLAN_KEY = '__fleet__';
 
 const MIN_WARP_TO_MOVE = 20;
 
+// Append to every rally-step prompt. The game assistant defaults to
+// "ready to... on your order, commander" politeness; this tells it to
+// just execute.
+const EXEC_NOW = ' execute immediately, no confirmation needed.';
+
 /**
  * Rally, refuel, bank — in order:
  *   1. fuel-share  → ships with spare warp help stranded ones (transfer_warp_power)
@@ -166,7 +171,7 @@ export const buildFleetRallyPlan = (ships = [], { keepCredits = 1000, megaports 
   // Step 1: fuel-share
   steps.push({
     name: 'fuel-share',
-    prompt: `fuel share. check EVERY ship (${fleetLabel}), including the primary ${primaryName}. any ship with warp < ${MIN_WARP_TO_MOVE} is stranded. for each stranded ship, find the nearest fleetmate with spare warp and use transfer_warp_power to give it at least ${MIN_WARP_TO_MOVE * 3} warp so it can reach a megaport. do this interactively — do NOT start autonomous tasks.`,
+    prompt: `fuel share. check EVERY ship (${fleetLabel}), including the primary ${primaryName}. any ship with warp < ${MIN_WARP_TO_MOVE} is stranded. for each stranded ship, find the nearest fleetmate with spare warp and use transfer_warp_power to give it at least ${MIN_WARP_TO_MOVE * 3} warp so it can reach a megaport. do this interactively — do NOT start autonomous tasks.${EXEC_NOW}`,
     nagMs: 120_000,
     maxMs: 6 * 60_000,
     isDone: (snap) => {
@@ -180,7 +185,7 @@ export const buildFleetRallyPlan = (ships = [], { keepCredits = 1000, megaports 
   // coordination later.
   steps.push({
     name: 'rally',
-    prompt: `converge at home hub ${homeHub}. route EVERY ship to sector ${homeHub} and dock — this includes the primary ${primaryName}, do NOT skip it. full fleet: ${fleetLabel}. call plot_course directly for each ship (interactive). do NOT use start_task — no trade/explore tasks, just move every ship to ${homeHub} and dock.`,
+    prompt: `converge at home hub ${homeHub}. route EVERY ship to sector ${homeHub} and dock — this includes the primary ${primaryName}, do NOT skip it. full fleet: ${fleetLabel}. call plot_course directly for each ship (interactive). do NOT use start_task — no trade/explore tasks, just move every ship to ${homeHub} and dock.${EXEC_NOW}`,
     nagMs: 150_000,
     maxMs: 8 * 60_000,
     isDone: (snap) => {
@@ -193,21 +198,25 @@ export const buildFleetRallyPlan = (ships = [], { keepCredits = 1000, megaports 
   // Step 3: fund ships for recharge
   // The game assistant can't query corp-ship credits directly — it only sees
   // its own context. We scraped the balances from the DOM, so we bake the
-  // per-ship transfer amounts into the prompt.
+  // per-ship transfer amounts and the total-to-withdraw into the prompt.
+  // Game mechanic: each transfer_credits is a separate action by the primary,
+  // so the agent must queue them one at a time; but one bank_withdraw covers
+  // the whole batch.
   const corpShips = ships.filter((s) => !s.primary);
-  const fundNeeded = corpShips
+  const fundTransfers = corpShips
     .filter((s) => s.credits != null && s.credits < 1000)
-    .map((s) => `${s.name}: has ${s.credits}, transfer ${1000 - s.credits}`);
+    .map((s) => ({ name: s.name, amount: 1000 - s.credits }));
   const fundUnknown = corpShips.filter((s) => s.credits == null).map((s) => s.name);
-  const fundLines = [];
-  if (fundNeeded.length) fundLines.push(fundNeeded.join('; '));
-  if (fundUnknown.length) fundLines.push(`unknown balances (top up to 1000 blindly, we'll sweep back later): ${fundUnknown.join(', ')}`);
-  const fundBody = fundLines.length
-    ? fundLines.join('. ')
+  for (const name of fundUnknown) fundTransfers.push({ name, amount: 1000 });
+  const fundTotal = fundTransfers.reduce((sum, t) => sum + t.amount, 0);
+  const fundSequence = fundTransfers.map((t, i) => `${i + 1}) transfer_credits ${t.amount} to ${t.name}`).join('; ');
+  const fundAlreadyOk = corpShips.filter((s) => s.credits != null && s.credits >= 1000).map((s) => s.name);
+  const fundBody = fundTransfers.length
+    ? `total to cover: ${fundTotal} credits. step A: ONE bank_withdraw of ${fundTotal} (or more, primary can re-deposit extra later). step B: queue these transfers in order, ONE AT A TIME — each transfer_credits is a separate primary-ship action, wait for the previous to complete before firing the next: ${fundSequence}. PARALLELISM: any corp ship that already has enough credits can start recharge_warp_power immediately (up to 3 corp ships can run actions at once); don't wait for primary to finish. ${fundAlreadyOk.length ? `already funded and can recharge in parallel: ${fundAlreadyOk.join(', ')}` : ''} after a ship receives its transfer, it should also start recharge_warp_power without waiting`
     : 'all corp ships already have ≥ 1000 credits — nothing to do';
   steps.push({
     name: 'fund-for-recharge',
-    prompt: `fund ships. ${primaryName} is at hub ${homeHub} with the corp ships. ${fundBody}. ${primaryName} withdraws from bank first if on-hand is short. use transfer_credits for each. interactive only — no new tasks.`,
+    prompt: `fund ships. ${primaryName} is at hub ${homeHub} with the corp ships. ${fundBody}. interactive only — no new tasks.${EXEC_NOW}`,
     nagMs: 90_000,
     maxMs: 4 * 60_000,
     isDone: (snap) => {
@@ -219,7 +228,7 @@ export const buildFleetRallyPlan = (ships = [], { keepCredits = 1000, megaports 
   // Step 4: recharge
   steps.push({
     name: 'recharge',
-    prompt: `recharge. all ships are funded and docked at ${homeHub}. recharge_warp_power on every ship to full, including the primary ${primaryName}. full fleet: ${fleetLabel}. do this interactively for each one.`,
+    prompt: `recharge. all ships are funded and docked at ${homeHub}. recharge_warp_power on every ship to full, including the primary ${primaryName}. full fleet: ${fleetLabel}. each ship runs its own recharge as a per-ship action — up to 3 corp ships can recharge in parallel. primary recharges itself. do this interactively.${EXEC_NOW}`,
     nagMs: 90_000,
     maxMs: 5 * 60_000,
     isDone: (snap) => {
@@ -238,16 +247,24 @@ export const buildFleetRallyPlan = (ships = [], { keepCredits = 1000, megaports 
   // everything above its own ${keepCredits} float. Uniform policy: all ships
   // get the same working capital. Balances baked in because the assistant
   // can't query them directly.
-  const balanceLines = corpShips.map((s) => {
-    if (s.credits == null) return `${s.name}: balance unknown — ask it to report credits, then top-up or sweep to ${keepCredits}`;
-    const diff = s.credits - keepCredits;
-    if (diff > 0) return `${s.name}: has ${s.credits}, transfer ${diff} to ${primaryName}`;
-    if (diff < 0) return `${s.name}: has ${s.credits}, ${primaryName} transfers ${-diff} to it`;
-    return `${s.name}: already at ${keepCredits}`;
-  });
+  const sweepsToPrimary = [];   // corp → primary (corp-ship actions, parallelizable up to 3)
+  const topUpsFromPrimary = []; // primary → corp (primary-ship actions, sequential)
+  const balanceUnknown = [];
+  for (const s of corpShips) {
+    if (s.credits == null) balanceUnknown.push(s.name);
+    else if (s.credits > keepCredits) sweepsToPrimary.push({ name: s.name, amount: s.credits - keepCredits });
+    else if (s.credits < keepCredits) topUpsFromPrimary.push({ name: s.name, amount: keepCredits - s.credits });
+  }
+  const sweepSeq = sweepsToPrimary.map((t, i) => `${i + 1}) ${t.name} transfer_credits ${t.amount} to ${primaryName}`).join('; ');
+  const topUpSeq = topUpsFromPrimary.map((t, i) => `${i + 1}) transfer_credits ${t.amount} to ${t.name}`).join('; ');
+  const balanceParts = [];
+  if (sweepsToPrimary.length) balanceParts.push(`PHASE 1 (corp ships sweep excess to primary — these are corp-ship actions, up to 3 can run in parallel): ${sweepSeq}`);
+  if (topUpsFromPrimary.length) balanceParts.push(`PHASE 2 (primary tops up low ships — these are primary-ship actions, queue ONE AT A TIME, wait for each to complete): ${topUpSeq}`);
+  if (balanceUnknown.length) balanceParts.push(`unknown balances: ${balanceUnknown.join(', ')} — ask each to report credits, then sweep or top up to ${keepCredits}`);
+  balanceParts.push(`PHASE 3 (primary bank_deposits everything above its own ${keepCredits} float)`);
   steps.push({
     name: 'credit-balance',
-    prompt: `balance credits at ${keepCredits} each. everyone is docked at hub ${homeHub}. ${balanceLines.join('; ')}. ${primaryName} withdraws from bank if on-hand too low for the top-ups. once every corp ship is at ${keepCredits}, ${primaryName} bank_deposits everything above its own ${keepCredits} float. interactive only — no new tasks.`,
+    prompt: `balance credits at ${keepCredits} each. everyone is docked at hub ${homeHub}. ${balanceParts.join('. ')}. interactive only — no new tasks.${EXEC_NOW}`,
     nagMs: 90_000,
     maxMs: 4 * 60_000,
     isDone: (snap) => {
@@ -264,7 +281,7 @@ export const buildFleetRallyPlan = (ships = [], { keepCredits = 1000, megaports 
   // Step 6: resume (optional — skip for "Home Base" which parks the fleet)
   if (resume) steps.push({
     name: 'resume',
-    prompt: `dispatch roles. put each ship back on its role-appropriate task. haulers on short fedspace NS trade loops, probes on explore/salvage (or their named role — refueler stays parked, explorer maps, scavenger salvages). primary on a fedspace trade loop.`,
+    prompt: `dispatch roles. put each ship back on its role-appropriate task. haulers on short fedspace NS trade loops, probes on explore/salvage (or their named role — refueler stays parked, explorer maps, scavenger salvages). primary on a fedspace trade loop.${EXEC_NOW}`,
     nagMs: 120_000,
     maxMs: 5 * 60_000,
     isDone: (snap) => {
