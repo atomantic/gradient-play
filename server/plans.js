@@ -171,7 +171,7 @@ export const buildFleetRallyPlan = (ships = [], { keepCredits = 1000, megaports 
   // Step 1: fuel-share
   steps.push({
     name: 'fuel-share',
-    prompt: `fuel share. check EVERY ship (${fleetLabel}), including the primary ${primaryName}. any ship with warp < ${MIN_WARP_TO_MOVE} is stranded. for each stranded ship, find the nearest fleetmate with spare warp and use transfer_warp_power to give it at least ${MIN_WARP_TO_MOVE * 3} warp so it can reach a megaport. do this interactively — do NOT start autonomous tasks.${EXEC_NOW}`,
+    prompt: `transfer_warp_power from fleetmates to any ship with warp < ${MIN_WARP_TO_MOVE}, enough to reach ≥ ${MIN_WARP_TO_MOVE * 3}. fleet: ${fleetLabel}. no new tasks.${EXEC_NOW}`,
     nagMs: 120_000,
     maxMs: 6 * 60_000,
     isDone: (snap) => {
@@ -185,7 +185,7 @@ export const buildFleetRallyPlan = (ships = [], { keepCredits = 1000, megaports 
   // coordination later.
   steps.push({
     name: 'rally',
-    prompt: `converge at home hub ${homeHub}. route EVERY ship to sector ${homeHub} and dock — this includes the primary ${primaryName}, do NOT skip it. full fleet: ${fleetLabel}. call plot_course directly for each ship (interactive). do NOT use start_task — no trade/explore tasks, just move every ship to ${homeHub} and dock.${EXEC_NOW}`,
+    prompt: `plot_course every ship to sector ${homeHub} and dock. fleet: ${fleetLabel}. no start_task.${EXEC_NOW}`,
     nagMs: 150_000,
     maxMs: 8 * 60_000,
     isDone: (snap) => {
@@ -216,7 +216,7 @@ export const buildFleetRallyPlan = (ships = [], { keepCredits = 1000, megaports 
     : 'all corp ships already have ≥ 1000 credits — nothing to do';
   steps.push({
     name: 'fund-for-recharge',
-    prompt: `fund ships. ${primaryName} is at hub ${homeHub} with the corp ships. ${fundBody}. interactive only — no new tasks.${EXEC_NOW}`,
+    prompt: `fund ships. ${fundBody}. no new tasks.${EXEC_NOW}`,
     nagMs: 90_000,
     maxMs: 4 * 60_000,
     isDone: (snap) => {
@@ -228,7 +228,7 @@ export const buildFleetRallyPlan = (ships = [], { keepCredits = 1000, megaports 
   // Step 4: recharge
   steps.push({
     name: 'recharge',
-    prompt: `recharge. all ships are funded and docked at ${homeHub}. recharge_warp_power on every ship to full, including the primary ${primaryName}. full fleet: ${fleetLabel}. each ship runs its own recharge as a per-ship action — up to 3 corp ships can recharge in parallel. primary recharges itself. do this interactively.${EXEC_NOW}`,
+    prompt: `recharge_warp_power on every ship to full. fleet: ${fleetLabel}. up to 3 in parallel.${EXEC_NOW}`,
     nagMs: 90_000,
     maxMs: 5 * 60_000,
     isDone: (snap) => {
@@ -264,7 +264,7 @@ export const buildFleetRallyPlan = (ships = [], { keepCredits = 1000, megaports 
   balanceParts.push(`PHASE 3 (primary bank_deposits everything above its own ${keepCredits} float)`);
   steps.push({
     name: 'credit-balance',
-    prompt: `balance credits at ${keepCredits} each. everyone is docked at hub ${homeHub}. ${balanceParts.join('. ')}. interactive only — no new tasks.${EXEC_NOW}`,
+    prompt: `balance credits at ${keepCredits} each. ${balanceParts.join('. ')}. no new tasks.${EXEC_NOW}`,
     nagMs: 90_000,
     maxMs: 4 * 60_000,
     isDone: (snap) => {
@@ -281,7 +281,7 @@ export const buildFleetRallyPlan = (ships = [], { keepCredits = 1000, megaports 
   // Step 6: resume (optional — skip for "Home Base" which parks the fleet)
   if (resume) steps.push({
     name: 'resume',
-    prompt: `dispatch roles. put each ship back on its role-appropriate task. haulers on short fedspace NS trade loops, probes on explore/salvage (or their named role — refueler stays parked, explorer maps, scavenger salvages). primary on a fedspace trade loop.${EXEC_NOW}`,
+    prompt: `dispatch each ship to its role task. haulers: short fedspace NS trade loops. probes/explorer: explore-salvage. scavenger: salvage. refueler: park. primary: fedspace trade loop.${EXEC_NOW}`,
     nagMs: 120_000,
     maxMs: 5 * 60_000,
     isDone: (snap) => {
