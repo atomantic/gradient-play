@@ -114,7 +114,7 @@ const probeTaskPrompt = (probe, role, target) => {
   // returns the adjacent unvisited sectors; without this reminder the agent
   // sometimes wanders via plot_course + my_status guesswork and re-visits
   // known hexes.
-  return `send ${probe} as far as it can go ${verb} new sectors until it runs out of fuel${where}. use local_map_region each hop to pick the nearest unvisited neighbor — never revisit known sectors. do not turn back to refuel — the primary will remote-sell it when the run is over.`
+  return `send ${probe} as far as it can go ${verb} new sectors until it runs out of fuel${where}. use local_map_region each hop to pick the nearest unvisited neighbor. prefer unvisited hops; if all neighbors are already known, transit through known sectors to reach fresh territory — do not halt just because the immediate neighbors are visited. do not turn back to refuel — the primary will remote-sell it when the run is over.`
     + standingOrders(probe, { isProbe: true });
 };
 
@@ -248,8 +248,8 @@ const DEFAULTS = {
   considerUpgrades: true,
   upgradeCreditsThreshold: 100000,
   corpTaskCap: 3,                 // fallback if DOM taskSlots.total isn't reported
-  probeSlots: 2,                   // phase 1: 1 explorer (run-dry) + 1 refueler (edge salvage)
-  tradeSlots: 1,                   // phase 1: 1 corp trader in fedspace; raise to 2 post-mapping
+  probeSlots: 1,                   // 1 probe for map expansion (explorer or scavenger)
+  tradeSlots: 2,                   // 2 corp haulers on fedspace trade loops — primary income
   primaryDispatchCooldownSec: 300,  // 5 min — tight enough to refill the local slot quickly when a task ends
   // Optional: override the generic "NS loop" dispatch with specific arbitrage
   // routes. Shape: { buyAt, sellAt, commodity, note }. Two fields — one for
@@ -466,13 +466,18 @@ const refuelerEdgePatrolPrompt = (refueler) => {
  */
 const probeReplacePrompt = (probeName, probeSector, probeWarp, primaryAtMegaport, hubSector, probeCredits) => {
   const loc = probeSector != null ? `@${probeSector}` : 'unknown sector';
+  // REMOTE SELL: sell_ship only checks the CALLER's (primary's) sector, not the
+  // target ship's sector. The probe stays put — it has 0 warp and cannot move
+  // anyway. Past failures were caused by the agent assuming the probe itself
+  // had to be at a megaport, so the prompt is now explicit: probe does not
+  // travel, the primary handles the sell from its own megaport.
   const travel = primaryAtMegaport
-    ? `you're docked at a megaport already — execute the sell immediately.`
-    : `you are NOT at a megaport. PRIORITY: plot_course to sector ${hubSector} and dock first, then execute the sell. interrupt any current trade task for this — it is more valuable than a single trade loop.`;
+    ? `your primary ship is already docked at a megaport — call sell_ship from here.`
+    : `your primary ship is NOT at a megaport. PRIORITY: primary plot_course to sector ${hubSector} and dock first, then call sell_ship from there. interrupt any current trade task — this is more valuable than a single trade loop.`;
   const creditsNote = probeCredits != null && probeCredits > 0
     ? ` note: ${probeName} is holding ${probeCredits} salvage credits — sell_ship refunds those to you along with the hull value, so they're recovered automatically.`
     : '';
-  return `${probeName} is stranded ${loc} at ${probeWarp ?? 0} warp and needs to be recycled.${creditsNote} ${travel} sequence: 1) call corporation_info to fetch ${probeName}'s ship_id. 2) sell_ship(ship_id=<hex prefix>) — refund covers hull (~1000 cr) + any credits the probe was holding. 3) ship_purchase a new Autonomous Probe with the refunded credits. 4) start_task to dispatch the fresh probe on exploration. one action at a time, execute immediately, no confirmation.`;
+  return `${probeName} is stranded ${loc} at ${probeWarp ?? 0} warp — recycle it via REMOTE SELL. DO NOT move ${probeName}; it has no warp and cannot travel. sell_ship only checks the primary's sector, so the primary calls it remotely on ${probeName}.${creditsNote} ${travel} sequence (primary performs all steps): 1) corporation_info to fetch ${probeName}'s ship_id. 2) sell_ship(ship_id=<${probeName}'s hex prefix>) — refund covers hull (~1000 cr) + any credits ${probeName} was holding. 3) ship_purchase a new Autonomous Probe. 4) start_task to dispatch the fresh probe on exploration. one action at a time, execute immediately, no confirmation.`;
 };
 
 /**
@@ -953,20 +958,32 @@ const decide = async (snapshot) => {
     }
   }
 
-  // Upgrade: only fire when (a) we know the primary ship's next tier and (b) we can
+  // Upgrade: fire when (a) we know the ship's next tier and (b) we can
   // actually afford it. Ship ladder lives in code (from strategy.md) so we don't
-  // ask the agent to look anything up.
-  if (cfg.enabled.upgrade && cfg.considerUpgrades && ex.shipName) {
-    const next = findNextUpgrade(ex.shipName);
+  // ask the agent to look anything up. Both primary and corp haulers are eligible —
+  // haulers are our main income stream, so upgrading them to larger cargo hulls
+  // compounds trade revenue.
+  if (cfg.enabled.upgrade && cfg.considerUpgrades) {
     const bank = ex.creditsBank ?? 0;
     const onHand = ex.creditsOnHand ?? 0;
     const total = bank + onHand;
-    if (next && total >= (next.netCost ?? next.price)) {
-      const key = `upgrade:${next.name}`;
-      if (canAct(key, cooldownMs * 2)) {
-        // Ship swap happens at a dock in one sitting — interactive, not a task.
-        pushInteractive({ key, text: upgradePrompt(ex.shipName, total, next) });
+    const upgradeCandidates = [];
+    if (ex.shipName) upgradeCandidates.push({ name: ex.shipName, role: 'primary' });
+    if (ceo) {
+      for (const s of corpShips) {
+        if (['hauler', 'trader-light'].includes(shipKind(s.name))) {
+          upgradeCandidates.push({ name: s.name, role: 'hauler' });
+        }
       }
+    }
+    for (const cand of upgradeCandidates) {
+      const next = findNextUpgrade(cand.name);
+      if (!next) continue;
+      if (total < (next.netCost ?? next.price)) continue;
+      const key = `upgrade:${cand.name}`;
+      if (!canAct(key, cooldownMs * 2)) continue;
+      pushInteractive({ key, text: upgradePrompt(cand.name, total, next) });
+      break; // one upgrade at a time — bank spends on the first eligible candidate
     }
   }
 

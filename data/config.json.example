@@ -1,0 +1,24 @@
+{
+  "_comment": "Per-user autopilot overrides. This file is git-ignored. Copy to config.json and edit for your account. Applied AFTER the UI config so these fields win regardless of what the UI sends.",
+
+  "isCeo": false,
+  "homeHub": 1413,
+  "megaports": [305, 472, 1413],
+  "safeMode": true,
+  "troubleMaker": false,
+  "probeSlots": 1,
+  "tradeSlots": 2,
+
+  "_preferredRoute_comment": "Optional: pin trade dispatches to specific arbitrage routes. Remove or set to null to fall back to the generic NS-loop prompt.",
+  "primaryPreferredRoute": null,
+  "haulerPreferredRoute": null,
+
+  "enabled": {
+    "refuel": true,
+    "explore": true,
+    "trade": true,
+    "bank": true,
+    "upgrade": true,
+    "primary": true
+  }
+}
