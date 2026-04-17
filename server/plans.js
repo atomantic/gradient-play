@@ -73,7 +73,7 @@ const isProbe = (ship) => /PROBE|EXPLORER|SCAVENGER|SALVAGER|SCOUT|PATHFINDER/i.
  *   3. recharge-warp     — top up warp
  *   4. resume            — put ship back on its role-appropriate task
  */
-export const buildRefuelPlan = (ship, { creditsForRefuel = 1000, megaports = [] } = {}) => {
+export const buildRefuelPlan = (ship, { creditsForRefuel = 1000, megaports = [], homeHub = 305 } = {}) => {
   const shipCredits = ship.credits ?? 0;
   const needsCredits = shipCredits < creditsForRefuel;
   const initialWarp = ship.warpPower ?? 0;
@@ -83,14 +83,18 @@ export const buildRefuelPlan = (ship, { creditsForRefuel = 1000, megaports = [] 
 
   steps.push({
     name: 'route-to-megaport',
-    prompt: `send ${ship.name} to the nearest megaport to refuel.`,
+    // Route explicitly to the home hub. "Nearest megaport" drifted to
+    // whichever port the agent considered nearest — sometimes landing the
+    // ship at a standard (non-mega) port like 1333, where recharge and
+    // primary↔corp credit transfers both fail. Home hub is guaranteed to
+    // be a real megaport (validated against config.megaports at Start).
+    prompt: `send ${ship.name} to sector ${homeHub} (home megaport) to refuel.`,
     nagMs: 120_000,
     maxMs: 7 * 60_000,
     isDone: (_snap, s, p) => {
-      // Already parked at a known megaport? Skip the routing step — no point
-      // telling a docked hauler to "go to a megaport". The pre-advance loop
-      // in autopilot runs isDone at plan creation time, so this also skips
-      // the prompt entirely when we catch the ship already docked.
+      // Already parked at a known megaport? Skip the routing step — the
+      // pre-advance loop runs this at plan creation time so we also skip
+      // the prompt entirely when we catch the ship already docked at a hub.
       if (s.sector != null && megaportSet.has(s.sector)) return true;
       // Early exit: if the ship is already at full warp (e.g. user manually
       // refueled, or another flow handled it), the refuel plan is moot —
@@ -98,25 +102,23 @@ export const buildRefuelPlan = (ship, { creditsForRefuel = 1000, megaports = [] 
       // "send hauler to megaport to refuel" firing at a full-fuel ship.
       const cap = s.warpMax ?? warpMaxOf(s);
       if (s.warpPower != null && s.warpPower >= cap * 0.9) return true;
-      // Heuristic: the ship is idle and its warp has stopped decreasing for
-      // one tick (no movement in-flight). Tracked via context.lastWarp.
-      const prev = p.context.lastWarp;
+      // NOTE: do NOT accept "docked at any port with no movement" as done.
+      // Earlier heuristics did, which let the plan advance at a standard
+      // (non-mega) port — then the fund-ship / recharge-warp steps fired
+      // at a port that accepts neither operation. Require a megaport match.
       p.context.lastWarp = s.warpPower;
-      if (s.active !== false) return false;
-      if (prev == null) return false;
-      // Docked + no movement between two successive ticks.
-      return s.warpPower === prev;
+      return false;
     }
   });
 
   if (needsCredits) {
     steps.push({
       name: 'fund-ship',
-      // transfer_credits requires both ships to be docked at the same megaport.
-      // If the primary is elsewhere, bring it to ${ship}'s port (or vice versa)
-      // before the transfer. If the primary is low on on-hand, it withdraws
-      // from bank first (bank_withdraw requires being docked too).
-      prompt: `${ship.name} is docked but broke. bring the primary ship to ${ship.name}'s megaport (they must be at the same port for transfer_credits to work). primary withdraws from bank if needed, then transfers ${creditsForRefuel} credits to ${ship.name}. no new autonomous task — do this inline.`,
+      // transfer_credits requires both ships to be docked at the same
+      // megaport. The primary typically lives at the home hub, so we
+      // coordinate the rendezvous there instead of asking the primary to
+      // chase the broke ship across the map.
+      prompt: `${ship.name} is at sector ${homeHub} (home megaport) but broke. primary ship should also dock at sector ${homeHub} (route there if not already), bank_withdraw if on-hand is low, then transfer_credits ${creditsForRefuel} to ${ship.name}. no new autonomous task — do this inline.`,
       nagMs: 90_000,
       maxMs: 4 * 60_000,
       isDone: (_snap, s) => (s.credits ?? 0) >= creditsForRefuel

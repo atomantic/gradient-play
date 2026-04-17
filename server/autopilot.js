@@ -762,7 +762,7 @@ const decide = async (snapshot) => {
       const isMoving = prevWarp != null && s.warpPower < prevWarp;
       if (s.warpPower < threshold && !isMoving) {
         if (slotBudget > 0) {
-          const plan = buildRefuelPlan(s, { creditsForRefuel: cfg.creditsForRefuel, megaports: megaportSectors() });
+          const plan = buildRefuelPlan(s, { creditsForRefuel: cfg.creditsForRefuel, megaports: megaportSectors(), homeHub: homeHub() });
           slotBudget -= 1;
           out.push({ key: `plan-create:refuel:${s.name}`, ship: s.name, createPlan: plan, createsTask: true });
         }
