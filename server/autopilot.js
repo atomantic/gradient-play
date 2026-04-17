@@ -222,6 +222,18 @@ const loadUserOverrides = () => {
   }
 };
 
+// Strategic advisor defaults. When enabled, the autopilot fires an LLM run
+// every `intervalSec` seconds that includes strategy.md as additional
+// context, asks the model to evaluate the full fleet state, and logs its
+// recommended next move. The output is surfaced in the UI — it is NOT auto-
+// executed, so a hallucinated directive can't send the fleet into a wall.
+const DEFAULT_STRATEGY_ADVISOR = {
+  enabled: false,
+  intervalSec: 900,   // 15 min between autonomous consultations
+  providerId: null,   // null → advisor picks an enabled API provider
+  model: null         // null → provider's default/light model
+};
+
 const DEFAULTS = {
   pollIntervalSec: 60,
   minWarp: 50,                    // below this: normal refuel (ship can still reach a megaport)
@@ -265,7 +277,8 @@ const DEFAULTS = {
     bank: true,
     upgrade: true,
     primary: true                 // keep the Kestrel working in fedspace trade
-  }
+  },
+  strategyAdvisor: DEFAULT_STRATEGY_ADVISOR
 };
 
 const state = {
@@ -282,6 +295,9 @@ const state = {
   prevWarp: new Map(), // ship name → last-tick warp, used to detect in-flight ships
   stuckTicks: 0,       // consecutive ticks with ≥2 ships at critical warp — triggers AI advisor
   lastAdvisorAt: 0,    // ms timestamp of last advisor dispatch (30-min cooldown)
+  lastStrategyAdvisorAt: 0, // ms timestamp of last strategy-advisor dispatch (separate cooldown from deadlock advisor)
+  primaryStrandedSinceTick: null, // consecutive-tick counter for non-CEO auto-stop when primary is unrescuable
+  lastUnrecoverableLogAt: 0, // ms — throttle the "operator required" log banner so we don't spam it
   // User-issued travel intents: ship name → { sector, issuedAt, msgTs }.
   // The game caps autonomous tasks at 100 steps, so a ship routing to a distant
   // sector will halt mid-transit. If the user told us where it was going, we
@@ -530,6 +546,59 @@ const findNextUpgrade = (shipName = '') => {
 const canAct = (key, cooldownMs) => {
   const prev = state.lastDecisionAt.get(key) || 0;
   return Date.now() - prev >= cooldownMs;
+};
+
+/**
+ * Content-level dedup against the live chat log. The in-memory cooldown map
+ * (state.lastDecisionAt) is cleared on every autopilot restart — which means
+ * a restart right after a dispatch re-fires the exact same prompt because
+ * the new process has no memory of what the old one just sent. This check
+ * reads the definitive source of truth: the chat viewport DOM. If a user
+ * message matching the head of this prompt appears in the last ~10 entries
+ * (roughly the last few minutes of activity), treat it as already-sent.
+ *
+ * Match is a normalized substring so the (' execute now' / ' [avoid tolls;
+ * bank all credits; execute now]') suffix differences don't cause misses.
+ */
+const normalizeForDedup = (text = '') =>
+  text.trim().toLowerCase().replace(/\s+/g, ' ');
+
+const isDuplicateOfRecentChat = (promptText, snapshot) => {
+  const target = normalizeForDedup(promptText).slice(0, 120);
+  if (target.length < 30) return false;
+  const msgs = snapshot?.extracted?.lastMessages || [];
+  const slice = msgs.slice(-10);
+  for (const m of slice) {
+    if (!m) continue;
+    if (!/\buser\s*:/i.test(m)) continue;
+    const normalized = m.toLowerCase().replace(/\s+/g, ' ');
+    if (normalized.includes(target)) return true;
+  }
+  return false;
+};
+
+/**
+ * A ship is "unrescuable from within autopilot" when its warp is below
+ * critical, it is not docked at a megaport, and nothing the autopilot can
+ * dispatch will refuel it: non-CEO mode has no corp savior, and even in CEO
+ * mode every other ship might be too low on warp to help. Plan nags and
+ * one-shot dispatches aimed at an unrescuable ship are noise — the ship
+ * can't execute them regardless of prompt wording.
+ */
+const isShipUnrescuable = (ship, allShips, cfg) => {
+  if (!ship) return false;
+  const critical = cfg?.fuelCriticalWarp ?? 15;
+  if (ship.warpPower == null || ship.warpPower >= critical) return false;
+  const megaports = new Set(cfg?.megaports || DEFAULT_MEGAPORTS);
+  if (ship.sector != null && megaports.has(ship.sector)) return false; // at port → can recharge_warp_power in place
+  if (!cfg?.isCeo) return true; // non-CEO can't dispatch a corp savior
+  const MIN_SAVIOR_WARP = Math.max(200, critical * 2 + 100);
+  const hasSavior = (allShips || []).some((c) =>
+    c.name !== ship.name
+    && c.warpPower != null
+    && c.warpPower >= MIN_SAVIOR_WARP
+  );
+  return !hasSavior;
 };
 
 /**
@@ -1035,12 +1104,21 @@ const decide = async (snapshot) => {
 const processPlans = async (snapshot) => {
   const ships = snapshot?.extracted?.ships || [];
   const doneShips = [];
+  const isCeoNow = !!state.config?.isCeo;
 
   for (const [shipName, plan] of state.plans) {
     // Fleet plans use a sentinel key; isDone gets the full snapshot, not a ship.
     const isFleet = shipName === FLEET_PLAN_KEY;
     const ship = isFleet ? null : ships.find((s) => s.name === shipName);
     if (!isFleet && !ship) continue; // ship not in snapshot yet; wait a tick
+    // Non-CEO safety: drop any plan that targets a corp ship. Prevents the
+    // nag loop from continuing to prompt corp ships when CEO is toggled off
+    // mid-session.
+    if (!isFleet && !isCeoNow && ship && !ship.primary) {
+      appendLog({ type: 'plan', shipName, goal: plan.goal, event: 'drop', reason: 'non-CEO cannot command corp ships' });
+      doneShips.push(shipName);
+      continue;
+    }
     const step = currentStepOf(plan);
     if (!step) { doneShips.push(shipName); continue; }
 
@@ -1074,10 +1152,18 @@ const processPlans = async (snapshot) => {
       const sinceLast = Date.now() - (plan.lastPromptedAt || plan.stepStartedAt);
       const nagMs = step.nagMs ?? 120_000;
       if (sinceLast > nagMs) {
-        const send = await sendAssistantPrompt(step.prompt).catch((e) => ({ ok: false, error: e.message }));
-        plan.lastPromptedAt = Date.now();
-        plan.promptCount += 1;
-        appendLog({ type: 'plan', shipName, goal: plan.goal, event: 'nag', step: step.name, text: step.prompt, send });
+        // Skip nag if the ship can't act on any prompt — stranded with no
+        // recoverable savior. Keeps the plan alive (will resume once fuel
+        // reappears) without spamming the assistant with unreachable orders.
+        if (!isFleet && isShipUnrescuable(ship, ships, state.config)) {
+          plan.lastPromptedAt = Date.now(); // reset so we don't re-check every tick
+          appendLog({ type: 'plan', shipName, goal: plan.goal, event: 'nag-suppressed', step: step.name, reason: 'ship unrescuable — awaiting fuel or manual intervention' });
+        } else {
+          const send = await sendAssistantPrompt(step.prompt).catch((e) => ({ ok: false, error: e.message }));
+          plan.lastPromptedAt = Date.now();
+          plan.promptCount += 1;
+          appendLog({ type: 'plan', shipName, goal: plan.goal, event: 'nag', step: step.name, text: step.prompt, send });
+        }
       }
     }
   }
@@ -1125,6 +1211,36 @@ const runTick = async () => {
     // Shared critical-warp scan: reused by the auto-confirm crisis guard and
     // the deadlock detector below so we don't walk the fleet twice per tick.
     const criticalCount = shipsNow.filter((s) => s.warpPower != null && s.warpPower < state.config.fuelCriticalWarp).length;
+
+    // Non-CEO auto-halt: if the player's primary ship is stranded (critical
+    // warp, not docked at a megaport) for multiple consecutive ticks and
+    // nothing the autopilot can issue will recover it — transfer_warp_power
+    // requires a corp savior and a non-CEO autopilot will never dispatch one —
+    // stop the autopilot rather than keep firing prompts the ship can't act
+    // on. The overnight failure mode was exactly this: the system kept nagging
+    // an out-of-fuel primary with refuel/travel directives that all need warp.
+    const cfgNow = state.config || {};
+    const isCeoNow = !!cfgNow.isCeo;
+    const primaryNow = shipsNow.find((s) => s.primary);
+    const megaportSetNow = new Set(cfgNow.megaports || DEFAULT_MEGAPORTS);
+    const primaryStranded = primaryNow
+      && primaryNow.warpPower != null
+      && primaryNow.warpPower < (cfgNow.fuelCriticalWarp ?? 15)
+      && primaryNow.sector != null
+      && !megaportSetNow.has(primaryNow.sector);
+
+    if (primaryStranded) {
+      state.primaryStrandedSinceTick = (state.primaryStrandedSinceTick ?? 0) + 1;
+    } else {
+      state.primaryStrandedSinceTick = 0;
+    }
+
+    if (!isCeoNow && primaryStranded && state.primaryStrandedSinceTick >= 2) {
+      const reason = `primary ${primaryNow.name} stranded at sector ${primaryNow.sector} with ${primaryNow.warpPower} warp and no CEO authority to dispatch a corp rescue — autopilot halting. Refuel manually (buy fighters to self-destruct and respawn if no other option), then restart autopilot.`;
+      appendLog({ type: 'error', error: reason });
+      stopAutopilot({ reason });
+      return;
+    }
     const newIntents = parseTravelIntents(snapshot);
     for (const t of newIntents) {
       state.travelIntents.set(t.ship, { sector: t.sector, issuedAt: Date.now(), msgTs: t.msgTs });
@@ -1257,6 +1373,34 @@ const runTick = async () => {
       );
     }
 
+    // Strategic advisor cadence. When enabled, periodically ask the LLM to
+    // evaluate the full fleet situation against strategy.md and surface its
+    // recommendation in the log. Output is NOT auto-executed — an operator
+    // reviews the run in the AI panel and decides what to act on.
+    const strategyCfg = state.config?.strategyAdvisor;
+    if (strategyCfg?.enabled) {
+      const intervalMs = Math.max(300, Number(strategyCfg.intervalSec) || 900) * 1000;
+      if (Date.now() - state.lastStrategyAdvisorAt > intervalMs) {
+        state.lastStrategyAdvisorAt = Date.now();
+        import('./advisor.js').then(({ adviseWithStrategy }) =>
+          adviseWithStrategy({
+            providerId: strategyCfg.providerId || undefined,
+            model: strategyCfg.model || undefined
+          })
+            .then((r) => appendLog({
+              type: 'event',
+              intelType: 'strategy-advisor-dispatched',
+              snippet: r.ok
+                ? `runId=${r.runId} provider=${r.providerId} model=${r.model}`
+                : `failed: ${r.error}`,
+              runId: r.runId,
+              providerId: r.providerId
+            }))
+            .catch((e) => appendLog({ type: 'error', error: `strategy advisor dispatch failed: ${e.message}` }))
+        );
+      }
+    }
+
     const corpActiveCount = (snapshot?.extracted?.ships || []).filter((s) => !s.primary && s.active === true).length;
     const cappedNow = corpActiveCount >= state.config.corpTaskCap;
     const slotsUsed = snapshot?.extracted?.taskSlots?.used;
@@ -1289,7 +1433,31 @@ const runTick = async () => {
     const shipsPrompted = new Set();
     let promptsSent = 0;
 
+    // Corp-ship dispatch hard-gate. Per-branch CEO checks in decide() are
+    // defense in depth, but a final belt-and-suspenders filter here
+    // guarantees that no corp-ship prompt ever leaves the autopilot when
+    // isCeo is false — shared corp task slots mean two non-CEO autopilots
+    // would trample each other's dispatches (real incident: two players'
+    // autopilots competed for the same hauler task).
+    const corpShipNames = new Set(
+      shipsNow.filter((s) => !s.primary).map((s) => s.name)
+    );
+    const corpGuardedDecisions = [];
     for (const d of decisions) {
+      if (!isCeoNow && d.ship && corpShipNames.has(d.ship)) {
+        appendLog({
+          type: 'decision',
+          key: d.key,
+          ship: d.ship,
+          text: '(suppressed — non-CEO autopilot may not command corp ships)',
+          skipped: true
+        });
+        continue;
+      }
+      corpGuardedDecisions.push(d);
+    }
+
+    for (const d of corpGuardedDecisions) {
       // Pace consecutive prompts: first send immediately, subsequent ones
       // wait for the agent to finish the previous command.
       if (promptsSent > 0 && interPromptDelayMs > 0) {
@@ -1322,24 +1490,43 @@ const runTick = async () => {
           state.plans.delete(d.ship);
         } else {
           const first = currentStepOf(plan);
-          const send = await sendAssistantPrompt(first.prompt).catch((e) => ({ ok: false, error: e.message }));
-          plan.lastPromptedAt = Date.now();
-          plan.promptCount += 1;
-          appendLog({
-            type: 'plan',
-            shipName: d.ship,
-            goal: plan.goal,
-            event: 'create',
-            stepCount: plan.steps.length,
-            step: first.name,
-            text: first.prompt,
-            send
-          });
+          if (isDuplicateOfRecentChat(first.prompt, snapshot)) {
+            plan.lastPromptedAt = Date.now();
+            appendLog({
+              type: 'plan',
+              shipName: d.ship,
+              goal: plan.goal,
+              event: 'create',
+              stepCount: plan.steps.length,
+              step: first.name,
+              note: 'dedup — same prompt already in recent chat; plan created without re-sending',
+              skipped: true
+            });
+          } else {
+            const send = await sendAssistantPrompt(first.prompt).catch((e) => ({ ok: false, error: e.message }));
+            plan.lastPromptedAt = Date.now();
+            plan.promptCount += 1;
+            appendLog({
+              type: 'plan',
+              shipName: d.ship,
+              goal: plan.goal,
+              event: 'create',
+              stepCount: plan.steps.length,
+              step: first.name,
+              text: first.prompt,
+              send
+            });
+          }
         }
       } else {
-        const send = await sendAssistantPrompt(d.text).catch((e) => ({ ok: false, error: e.message }));
-        state.lastDecisionAt.set(d.key, Date.now());
-        appendLog({ type: 'decision', key: d.key, ship: d.ship, text: d.text, send });
+        if (isDuplicateOfRecentChat(d.text, snapshot)) {
+          state.lastDecisionAt.set(d.key, Date.now());
+          appendLog({ type: 'decision', key: d.key, ship: d.ship, text: d.text, skipped: true, note: 'dedup — same prompt already in recent chat' });
+        } else {
+          const send = await sendAssistantPrompt(d.text).catch((e) => ({ ok: false, error: e.message }));
+          state.lastDecisionAt.set(d.key, Date.now());
+          appendLog({ type: 'decision', key: d.key, ship: d.ship, text: d.text, send });
+        }
       }
       if (d.ship) shipsPrompted.add(d.ship);
       promptsSent += 1;
@@ -1367,6 +1554,11 @@ export const startAutopilot = (config = {}) => {
       ...DEFAULTS.enabled,
       ...(config.enabled || {}),
       ...(overrides.enabled || {})
+    },
+    strategyAdvisor: {
+      ...DEFAULT_STRATEGY_ADVISOR,
+      ...(config.strategyAdvisor || {}),
+      ...(overrides.strategyAdvisor || {})
     }
   };
   // Guard: homeHub must be one of the known megaports. A stale localStorage
@@ -1382,6 +1574,8 @@ export const startAutopilot = (config = {}) => {
   }
   state.running = true;
   state.startedAt = Date.now();
+  state.stopReason = null;
+  state.primaryStrandedSinceTick = 0;
   state.lastDecisionAt.clear();
   state.seenEventKeys.clear();
   state.plans.clear();
@@ -1392,17 +1586,19 @@ export const startAutopilot = (config = {}) => {
   return { ok: true, config: state.config };
 };
 
-export const stopAutopilot = () => {
+export const stopAutopilot = ({ reason = null } = {}) => {
   if (!state.running) return { ok: false, error: 'not running' };
   state.running = false;
   if (state.timer) clearTimeout(state.timer);
   state.timer = null;
-  appendLog({ type: 'stop' });
-  return { ok: true };
+  state.stopReason = reason;
+  appendLog({ type: 'stop', reason });
+  return { ok: true, reason };
 };
 
 export const getAutopilotState = () => ({
   running: state.running,
+  stopReason: state.running ? null : (state.stopReason || null),
   config: state.config,
   startedAt: state.startedAt,
   lastSnapshot: state.lastSnapshot?.extracted || null,
