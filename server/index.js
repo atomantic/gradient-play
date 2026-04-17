@@ -24,7 +24,7 @@ import { loadMissionTemplates, saveMissionTemplate, deleteMissionTemplate } from
 import { credentialsStatus, setCredentials, clearCredentials } from './credentials.js';
 import { startAutopilot, stopAutopilot, getAutopilotState, subscribeAutopilotLog, startFleetRally, fireRallyStep } from './autopilot.js';
 import { getIntel, addManualEvent, updateEvent as updateIntelEvent, deleteEvent, clearIntel, observe as intelObserve } from './intel.js';
-import { aiToolkit, adviseAutopilot } from './advisor.js';
+import { aiToolkit, adviseAutopilot, adviseWithStrategy } from './advisor.js';
 
 const PORT = Number(process.env.PORT || 5572);
 const HOST = process.env.HOST || '127.0.0.1';
@@ -292,6 +292,14 @@ app.post('/api/ai/advise-autopilot', async (req, res) => {
   log('🧠', 'Advisor requested', { providerId, question });
   const result = await adviseAutopilot({ providerId, model, question, extraContext });
   log(result.ok ? '✅' : '⚠️', `Advisor ${result.ok ? 'started' : 'failed'}`, { runId: result.runId, error: result.error });
+  res.json(result);
+});
+
+app.post('/api/ai/advise-strategy', async (req, res) => {
+  const { providerId, model } = req.body || {};
+  log('📘', 'Strategy advisor requested', { providerId });
+  const result = await adviseWithStrategy({ providerId, model });
+  log(result.ok ? '✅' : '⚠️', `Strategy advisor ${result.ok ? 'started' : 'failed'}`, { runId: result.runId, error: result.error });
   res.json(result);
 });
 

@@ -1,6 +1,6 @@
 import { createAIToolkit } from 'portos-ai-toolkit/server';
 import path from 'node:path';
-import { existsSync } from 'node:fs';
+import { existsSync, readFileSync, statSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { getAutopilotState } from './autopilot.js';
 import { getGameSnapshot } from './cdp.js';
@@ -132,4 +132,33 @@ export const adviseAutopilot = async ({ providerId, model, question, extraContex
   }
 
   return { ok: true, runId, providerId: chosenId, model: chosenModel, promptPreview: prompt.slice(0, 200) };
+};
+
+// strategy.md lives at repo root. Cached in memory — re-read only when the
+// file's mtime changes so we don't slam disk on every advisor tick.
+const STRATEGY_DOC_PATH = path.resolve(__dirname, '..', 'strategy.md');
+let strategyDocCache = { text: null, mtimeMs: 0 };
+const loadStrategyDoc = () => {
+  if (!existsSync(STRATEGY_DOC_PATH)) return '';
+  const mtime = statSync(STRATEGY_DOC_PATH).mtimeMs ?? 0;
+  if (strategyDocCache.text != null && mtime === strategyDocCache.mtimeMs) return strategyDocCache.text;
+  const text = readFileSync(STRATEGY_DOC_PATH, 'utf8');
+  strategyDocCache = { text, mtimeMs: mtime };
+  return text;
+};
+
+/**
+ * Run an advisor pass that includes the full strategy.md playbook as extra
+ * context and asks the model to recommend the single most valuable next
+ * move for the fleet. Used by the autopilot's strategic-advisor cadence and
+ * by the /api/ai/advise-strategy "run now" button. Returns the same shape as
+ * `adviseAutopilot` so the caller polls the run via /api/ai/runs/:id.
+ */
+export const adviseWithStrategy = async ({ providerId, model } = {}) => {
+  const doc = loadStrategyDoc();
+  const question = 'Using the strategy guide above, evaluate the fleet\'s current state and recommend the single highest-value next action (or short sequence). Be concrete: name ships, sectors, and tool calls. If the situation is stable and the rule-based autopilot is already doing the right thing, say so.';
+  const extraContext = doc
+    ? `STRATEGY GUIDE (strategy.md — treat as authoritative playbook for Gradient Bang):\n\n${doc}`
+    : 'STRATEGY GUIDE: (strategy.md not found on disk — advise from first principles)';
+  return adviseAutopilot({ providerId, model, question, extraContext });
 };
