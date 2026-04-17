@@ -1,4 +1,4 @@
-import { getGameSnapshot, sendAssistantPrompt, clickGameReconnect, loginIfNeeded } from './cdp.js';
+import { getGameSnapshot, sendAssistantPrompt, clickGameReconnect, loginIfNeeded, getMapSectors } from './cdp.js';
 import { observe as intelObserve, dangerousSectors } from './intel.js';
 import { buildRefuelPlan, buildFleetRallyPlan, FLEET_PLAN_KEY, currentStepOf, isComplete, advance } from './plans.js';
 
@@ -35,7 +35,13 @@ const standingOrders = (shipName = '', { isProbe = false, creditKeep = 1000 } = 
   return ` [${parts.join('; ')}]`;
 };
 
-const interactiveOnlyClause = () => ' [no new task — interactive only]';
+// Appended to prompts that should run inline in chat instead of occupying a
+// task slot. Earlier wording ("no new task — interactive only") made the
+// agent think the instruction itself was forbidden ("banking requires a
+// formal task according to standard protocol"). The new phrasing mirrors
+// the fleet-plan prompts that reliably succeed — an imperative "do this
+// now" with no reference to the task system at all.
+const interactiveOnlyClause = () => ' [execute immediately, no confirmation]';
 
 const refuelPrompt = (ship, warp) => pick([
   `refuel ${ship} at hub ${homeHub()} (${warp} warp)`,
@@ -91,22 +97,48 @@ const rescueStrandedPrompt = (ship, sector, warp) => {
   ]) + standingOrders(ship) + interactiveOnlyClause();
 };
 
-const probeExplorePrompt = (probe, hops) => pick([
-  `${probe}: explore ${hops} hops from hub ${homeHub()}, frontier edges, claim salvage, return to refuel`,
-  `${probe}: map ${hops} hops outward, grab salvage, return to hub ${homeHub()} before warp runs low`,
-  `${probe}: explore frontier ${hops} hops, salvage, refuel at hub ${homeHub()}`
-]) + standingOrders(probe, { isProbe: true });
+const probeTaskPrompt = (probe, role, target) => {
+  const verb = role === 'scavenger' ? 'salvaging' : 'exploring';
+  const where = target != null
+    ? ` starting at sector ${target}`
+    : '';
+  // Nudge the agent toward the right discovery tool. local_map_region(depth=3)
+  // returns the adjacent unvisited sectors; without this reminder the agent
+  // sometimes wanders via plot_course + my_status guesswork and re-visits
+  // known hexes.
+  return `send ${probe} as far as it can go ${verb} new sectors until it runs out of fuel${where}. use local_map_region each hop to pick the nearest unvisited neighbor — never revisit known sectors. do not turn back to refuel — the primary will remote-sell it when the run is over.`
+    + standingOrders(probe, { isProbe: true });
+};
 
-const haulerTradePrompt = (hauler) => pick([
-  `${hauler}: NS trade loop, fedspace, 2-3 hops, rotate routes if stock depletes`,
-  `put ${hauler} on NS trade, 2-3 hop fedspace loop, rotate on depletion`,
-  `${hauler}: 2-3 hop NS loop in fedspace, rotate routes as needed`
-]) + standingOrders(hauler);
+const probeExplorePrompt = (probe, target) => probeTaskPrompt(probe, 'explorer', target);
+const scavengerPrompt = (scav, target) => probeTaskPrompt(scav, 'scavenger', target);
+const explorerPrompt = (expl, target) => probeTaskPrompt(expl, 'explorer', target);
 
-const bankSweepPrompt = (excess, onHand, floor) => pick([
-  `bank ${excess} credits next dock, keep ${floor}` + interactiveOnlyClause(),
-  `sweep ${excess} to bank, hold ${floor}` + interactiveOnlyClause(),
-  `deposit ${excess}, keep ${floor}` + interactiveOnlyClause()
+const haulerTradePrompt = (hauler) => {
+  const route = state.config?.haulerPreferredRoute;
+  if (route?.buyAt != null && route?.sellAt != null && route?.commodity) {
+    const note = route.note ? ` ${route.note}.` : '';
+    return `${hauler}: PREFERRED ROUTE — buy ${route.commodity} at sector ${route.buyAt}, sell at sector ${route.sellAt}, repeat.${note} fill cargo on every buy. if stock depletes below profitability, fall back to a short fedspace NS loop. coordinate timing with fleetmate traders on the same megaport.` + standingOrders(hauler);
+  }
+  return pick([
+    `${hauler}: fedspace NS loop, 2-3 hops, max cr/warp. rotate on depletion, no fleetmate port overlap.`,
+    `${hauler}: 2-3 hop NS trade in fedspace. rank cr/warp, rotate routes, stagger from fleetmates.`,
+    `${hauler}: NS loop fedspace, 2-3 hops. optimize cr/warp, rotate on stock drop, avoid fleetmate ports.`
+  ]) + standingOrders(hauler);
+};
+
+// The agent categorically refuses to run bank_deposit interactively — its
+// standing rule is "banking operations require a dedicated task." So we
+// frame the sweep as a one-shot bank task instead of an inline command.
+// This consumes a task slot; `pushTaskDecision` (not pushInteractive) is
+// the correct dispatch path. IMPORTANT: name the primary ship explicitly —
+// ex.creditsOnHand is the PLAYER'S top-bar balance, which only the primary
+// can deposit. Without a name the agent has handed this task to whichever
+// ship it felt like (e.g., a hauler that didn't actually hold the excess).
+const bankSweepPrompt = (primary, excess, onHand, floor) => pick([
+  `${primary}: bank task — dock at the nearest megaport, bank_deposit ${excess} credits from on-hand, keep ${floor} on hand, then resume your previous activity.`,
+  `${primary}: quick bank run — route to a megaport, bank_deposit ${excess} credits (keep ${floor} on hand), resume trading after.`,
+  `${primary}: banking task — bank_deposit ${excess} credits at next dock, hold ${floor} on hand, then return to previous route.`
 ]);
 
 /**
@@ -137,11 +169,18 @@ const upgradePrompt = (shipName, total, next) => pick([
   `swap ${shipName} → ${next.name} next megaport` + interactiveOnlyClause()
 ]);
 
-const primaryTradePrompt = (primary) => pick([
-  `${primary}: NS trade loop, fedspace, 2-3 hops, rotate on depletion`,
-  `${primary}: fedspace NS trade, 2-3 hops, switch routes if stock thins`,
-  `${primary}: NS 2-3 hop loop, fedspace, rotate routes as needed`
-]) + standingOrders(primary);
+const primaryTradePrompt = (primary) => {
+  const route = state.config?.primaryPreferredRoute;
+  if (route?.buyAt != null && route?.sellAt != null && route?.commodity) {
+    const note = route.note ? ` ${route.note}.` : '';
+    return `${primary}: PREFERRED ROUTE — buy ${route.commodity} at sector ${route.buyAt}, sell at sector ${route.sellAt}, repeat.${note} if stock depletes below profitability, fall back to a short fedspace NS loop; coordinate timing with fleetmate traders on the same megaport.` + standingOrders(primary);
+  }
+  return pick([
+    `${primary}: fedspace NS loop, 2-3 hops, max cr/warp. rotate on depletion, no fleetmate port overlap.`,
+    `${primary}: 2-3 hop NS trade in fedspace. rank cr/warp, rotate routes, stagger from fleetmates.`,
+    `${primary}: NS loop fedspace, 2-3 hops. optimize cr/warp, rotate on stock drop, avoid fleetmate ports.`
+  ]) + standingOrders(primary);
+};
 
 /**
  * Reckless frontier mode for the primary ship. Leaves fedspace, hunts
@@ -162,6 +201,26 @@ const primaryTroubleMakerPrompt = (primary) => {
   ]) + orders;
 };
 
+// Per-user config overrides loaded from data/config.json (git-ignored). This
+// is how individual corp members set their own isCeo flag, homeHub, etc.
+// without committing their state to the shared codebase. Applied as the last
+// merge layer in startAutopilot so it always wins over incoming UI config —
+// one authoritative source of truth per checkout.
+import { existsSync as _existsSync, readFileSync as _readFileSync } from 'node:fs';
+import { dirname as _dirname, resolve as _resolve } from 'node:path';
+import { fileURLToPath as _fileURLToPath } from 'node:url';
+const USER_CONFIG_PATH = _resolve(_dirname(_fileURLToPath(import.meta.url)), '..', 'data', 'config.json');
+const loadUserOverrides = () => {
+  if (!_existsSync(USER_CONFIG_PATH)) return {};
+  try {
+    const parsed = JSON.parse(_readFileSync(USER_CONFIG_PATH, 'utf8'));
+    return typeof parsed === 'object' && parsed ? parsed : {};
+  } catch (err) {
+    console.error(`[autopilot] failed to parse ${USER_CONFIG_PATH}: ${err.message}`);
+    return {};
+  }
+};
+
 const DEFAULTS = {
   pollIntervalSec: 60,
   minWarp: 50,                    // below this: normal refuel (ship can still reach a megaport)
@@ -169,24 +228,35 @@ const DEFAULTS = {
   fuelCriticalWarp: 15,           // below this: emergency — request transfer_warp_power rescue
   refuelCooldownSec: 180,         // per-ship: re-nag every 3 min if warp stays low
   rescueCooldownSec: 90,          // per-ship: re-nag every 90s if stranded
-  creditsForRefuel: 1000,         // credits to transfer to a corp ship before recharge if it's broke
-  shipFundingFloor: 1000,         // minimum credits a ship should have before dispatch — seed from primary if below
-  onHandFloor: 1000,              // working float to keep on-hand on every ship
-  depositExcessOver: 4000,        // trigger sweep when on-hand is floor+this (so 5000 → deposit 4000, leave 1000)
+  creditsForRefuel: 1000,         // credits to transfer to a corp ship before recharge if it's broke (~1000 = full probe recharge)
+  // Working-capital floors. A single NS trade on a Wayfarer/Atlas can cost
+  // 3-5k cr; even on a Kestrel a primary trade costs ~1500. Keep enough
+  // on-hand that a buy doesn't strand the ship at zero credits. Override
+  // per-account via data/config.json if you're flying a bigger hull.
+  shipFundingFloor: 3000,         // minimum credits a ship should have before dispatch — seed from primary if below
+  onHandFloor: 5000,              // working float to keep on-hand on every ship (covers a single ~1500 cr trade plus buffer)
+  depositExcessOver: 5000,        // trigger sweep when on-hand is floor+this (so 10k → deposit 5k, leave 5k)
   decisionCooldownSec: 420,       // 7 min — longer than a typical refuel or task handoff
-  exploreMaxHops: 40,
   considerUpgrades: true,
   upgradeCreditsThreshold: 100000,
   corpTaskCap: 3,                 // fallback if DOM taskSlots.total isn't reported
-  probeSlots: 2,                   // how many probes to keep exploring at once
-  tradeSlots: 2,                   // how many haulers/traders to keep running at once
+  probeSlots: 2,                   // phase 1: 1 explorer (run-dry) + 1 refueler (edge salvage)
+  tradeSlots: 1,                   // phase 1: 1 corp trader in fedspace; raise to 2 post-mapping
   primaryDispatchCooldownSec: 300,  // 5 min — tight enough to refill the local slot quickly when a task ends
+  // Optional: override the generic "NS loop" dispatch with specific arbitrage
+  // routes. Shape: { buyAt, sellAt, commodity, note }. Two fields — one for
+  // the primary ship, one for all corp haulers. Set via data/config.json.
+  primaryPreferredRoute: null,
+  haulerPreferredRoute: null,
   megaports: [305, 472, 1413],      // known mega-port sectors — add more as probes discover them
   homeHub: 1413,                    // preferred dock for fuel/banking — the fleet's home base
   safeMode: true,                  // restrict non-probe ships to federation space
-  isCeo: false,                    // only CEO can manage corp ships; non-CEO autopilot only drives the primary
+  // CEO mode: autopilot dispatches corp ships. Default off so cloned checkouts
+  // don't stomp on a corp's task slots. Override per-user via data/config.json.
+  isCeo: false,
   troubleMaker: false,             // reckless mode: primary leaves fedspace for salvage + combat + frontier trading
   maxDecisionsPerTick: 2,          // never fire more than N prompts in one tick — avoids flooding the agent
+  interPromptDelayMs: 12_000,      // pause between consecutive prompts in the same tick so the agent finishes the previous action before the next arrives
   enabled: {
     refuel: true,
     explore: true,
@@ -271,7 +341,7 @@ const parseAssistantEvents = (snapshot) => {
       if (!ship) continue;
       const key = `${pat.type}:${ship.name}:${msgTs || m.slice(0, 40)}`;
       if (state.seenEventKeys.has(key)) continue;
-      state.seenEventKeys.add(key);
+      markSeen(key);
       events.push({
         type: pat.type,
         ship: ship.name,
@@ -310,7 +380,7 @@ const parseTravelIntents = (snapshot) => {
       if (!ship) continue;
       const key = `travel-intent:${ship.name}:${sector}:${msgTs || m.slice(0, 40)}`;
       if (state.seenEventKeys.has(key)) continue;
-      state.seenEventKeys.add(key);
+      markSeen(key);
       intents.push({ ship: ship.name, sector, msgTs, roleWord: role });
     }
   }
@@ -322,6 +392,20 @@ const appendLog = (entry) => {
   state.log.push(stamped);
   if (state.log.length > 500) state.log.splice(0, state.log.length - 500);
   for (const fn of state.subscribers) fn(stamped);
+};
+
+// Dedup keys grow per-event (travel-resume keys include a timestamp, auto-
+// confirm keys include a 60-char message slice), so the set would grow
+// indefinitely over a multi-day session. Cap it and drop the oldest entries
+// when we blow the ceiling — Set preserves insertion order.
+const SEEN_KEY_CAP = 2000;
+const markSeen = (key) => {
+  state.seenEventKeys.add(key);
+  if (state.seenEventKeys.size > SEEN_KEY_CAP) {
+    const drop = state.seenEventKeys.size - SEEN_KEY_CAP;
+    const it = state.seenEventKeys.values();
+    for (let i = 0; i < drop; i++) state.seenEventKeys.delete(it.next().value);
+  }
 };
 
 const shipKind = (name = '') => {
@@ -348,32 +432,71 @@ const probeRole = (name = '') => {
   return null;
 };
 
-const refuelerDispatchPrompt = (refueler, target, targetSector, targetWarp) => {
-  const loc = targetSector != null ? ` @${targetSector}` : '';
+// The refueler probe patrols the rim of federation space. It dips into
+// adjacent neutral sectors hunting salvage, then returns to the nearest
+// megaport the moment it finds any — recharge_warp_power paid from the
+// salvage credits, remainder banked. Self-sustaining: unlike the explorer,
+// this probe does NOT run dry; it manages its own fuel cycle.
+const refuelerEdgePatrolPrompt = (refueler) => {
+  const combat = `flee all combat — do NOT engage. snipe salvage and retreat; never attack.`;
+  const range = `work the fedspace rim and up to 3 hops into adjacent neutral space — no deeper`;
+  const tolls = `HARD RULE: NEVER enter a toll sector and NEVER enter a sector with a hostile garrison. before plotting any course into neutral space, use local_map_region to check the destination and every hop along the route for garrisons/tolls — if ANY are present, abort and pick a different sector. NO salvage is worth a toll payment or a garrison hit. scan *near* tolls from the safe side only; if the only path to salvage goes through a toll, skip that salvage and move on.`;
   return pick([
-    `${refueler}: rescue ${target}${loc} (${targetWarp} warp), transfer_warp_power, return to hub ${homeHub()}`,
-    `fuel drop: ${refueler} → ${target}${loc}, transfer warp, back to hub`,
-    `${refueler}: route to ${target}${loc}, transfer_warp_power, return to hub ${homeHub()}`
+    `${refueler}: fedspace-edge salvage patrol. ${range}. scan for salvage. ${tolls} ${combat} on any salvage find, immediately plot_course to the nearest megaport, recharge_warp_power first (pay from the salvage credits), then bank or transfer the leftover credits to the primary. resume patrol after refuel.`,
+    `${refueler}: patrol the border between federation and neutral space. ${range}. scan for salvage. ${tolls} ${combat} when you grab any, head straight to the nearest megaport — refuel with the salvage credits, deposit the rest, then go back out.`,
+    `${refueler}: edge salvager. ${range}. ${tolls} ${combat} any salvage claim means immediate return: nearest megaport, recharge_warp_power using the credits, bank the remainder, resume.`
   ]) + standingOrders(refueler, { isProbe: true });
 };
 
-const refuelerStandbyPrompt = (refueler) => pick([
-  `${refueler}: standby at hub ${homeHub()}, full warp, no trade/explore`,
-  `park ${refueler} at hub ${homeHub()}, fully fueled, on-call`,
-  `${refueler} standby: hub ${homeHub()}, full warp, wait`
-]) + standingOrders(refueler, { isProbe: true });
+/**
+ * Remote-sell a stranded probe and replace it with a fresh one. strategy.md
+ * §7: sell_ship only checks the caller's personal-ship location (megaport in
+ * fedspace), not the probe's sector. Stranded probes at 0 warp deep in neutral
+ * space can be sold remotely — the refund covers a new probe's full cost.
+ * Fires as a one-shot interactive prompt; agent resolves the ship_id via
+ * corporation_info() and handles the purchase.
+ */
+const probeReplacePrompt = (probeName, probeSector, probeWarp, primaryAtMegaport, hubSector, probeCredits) => {
+  const loc = probeSector != null ? `@${probeSector}` : 'unknown sector';
+  const travel = primaryAtMegaport
+    ? `you're docked at a megaport already — execute the sell immediately.`
+    : `you are NOT at a megaport. PRIORITY: plot_course to sector ${hubSector} and dock first, then execute the sell. interrupt any current trade task for this — it is more valuable than a single trade loop.`;
+  const creditsNote = probeCredits != null && probeCredits > 0
+    ? ` note: ${probeName} is holding ${probeCredits} salvage credits — sell_ship refunds those to you along with the hull value, so they're recovered automatically.`
+    : '';
+  return `${probeName} is stranded ${loc} at ${probeWarp ?? 0} warp and needs to be recycled.${creditsNote} ${travel} sequence: 1) call corporation_info to fetch ${probeName}'s ship_id. 2) sell_ship(ship_id=<hex prefix>) — refund covers hull (~1000 cr) + any credits the probe was holding. 3) ship_purchase a new Autonomous Probe with the refunded credits. 4) start_task to dispatch the fresh probe on exploration. one action at a time, execute immediately, no confirmation.`;
+};
 
-const scavengerPrompt = (scav, hops) => pick([
-  `${scav}: salvage run ${hops} hops from hub ${homeHub()}, frontier edges, return to refuel`,
-  `${scav}: ${hops} hop salvage sweep, frontier, return to hub ${homeHub()} before warp runs low`,
-  `${scav}: ${hops} hops outward, claim salvage, back to hub to refuel`
-]) + standingOrders(scav, { isProbe: true });
-
-const explorerPrompt = (expl, hops) => pick([
-  `${expl}: explore ${hops} hops from hub ${homeHub()}, frontier edges, claim salvage, return to refuel`,
-  `${expl}: map ${hops} hops outward, frontier sectors, back to hub ${homeHub()} before warp runs low`,
-  `${expl}: ${hops} hops along frontier, salvage, return to hub to refuel`
-]) + standingOrders(expl, { isProbe: true });
+/**
+ * BFS through visited known sectors from `fromSectorId`, returning the nearest
+ * unvisited sector (or an unknown adjacent sector) as the frontier target.
+ * `excludeIds` prevents assigning the same frontier to two probes in one tick.
+ * Returns null if no frontier is reachable through known space.
+ */
+export const findNearestFrontier = (sectors, fromSectorId, excludeIds = new Set()) => {
+  if (!Array.isArray(sectors) || fromSectorId == null) return null;
+  const by = new Map(sectors.map((s) => [s.id, s]));
+  if (!by.has(fromSectorId)) return null;
+  const dist = new Map([[fromSectorId, 0]]);
+  const queue = [fromSectorId];
+  while (queue.length) {
+    const cur = queue.shift();
+    const curDist = dist.get(cur);
+    const node = by.get(cur);
+    if (!node) continue;
+    for (const nb of node.adj || []) {
+      if (dist.has(nb)) continue;
+      if (excludeIds.has(nb)) { dist.set(nb, curDist + 1); continue; }
+      const nbNode = by.get(nb);
+      if (!nbNode || !nbNode.visited) {
+        return { sector: nb, hops: curDist + 1 };
+      }
+      dist.set(nb, curDist + 1);
+      queue.push(nb);
+    }
+  }
+  return null;
+};
 
 // Next upgrade tier by current ship class, from strategy.md.
 // netCost = price minus ~60% trade-in value of the current ship. This is
@@ -411,7 +534,7 @@ const canAct = (key, cooldownMs) => {
  *
  * Caller applies cooldown dedup and sends prompts.
  */
-const decide = (snapshot) => {
+const decide = async (snapshot) => {
   const cfg = state.config;
   const ex = snapshot?.extracted || {};
   const ships = ex.ships || [];
@@ -462,15 +585,18 @@ const decide = (snapshot) => {
   //   - warp < minWarp → LOW. Standard refuel prompt: break off, route to megaport.
   //     Medium cooldown (180s) — tighter than the general decisionCooldown so we
   //     don't let a ship drain from 50 to 0 across a single 7-min cooldown window.
-  // Identify a dedicated refueler probe (name-based). If present, stranded
-  // ships get a targeted refueler dispatch instead of the generic rescue prompt.
-  const refueler = ships.find((s) => probeRole(s.name) === 'refueler' && !s.primary);
-  const refuelerAvailable = refueler && refueler.active === false
-    && refueler.warpPower != null
-    && refueler.warpPower >= Math.max(cfg.minWarp, 100);
+  // Refueler probe now runs fedspace-edge salvage patrols (see
+  // refuelerEdgePatrolPrompt) — it's no longer a rescue ship. Stranded
+  // corpmates fall back to the generic rescue prompt (any fueled corpmate).
   const megaportSet = new Set(megaportSectors());
   const primaryShip = ships.find((s) => s.primary);
   const primaryName = primaryShip?.name || 'the primary ship';
+  // Primary is "available" when it's present, idle (no autonomous task), and
+  // not currently steering a plan. Several downstream dispatches gate on this
+  // so we don't stack a new order on top of in-progress work.
+  const primaryAvailable = !!primaryShip
+    && primaryShip.active === false
+    && !hasPlan(primaryShip.name);
 
   // PRIMARY FUEL EMERGENCY. If the primary is at/below critical warp, saving
   // it takes priority over every other rescue: the primary has bank access
@@ -486,9 +612,13 @@ const decide = (snapshot) => {
       && primaryShip.warpPower < cfg.fuelCriticalWarp
       && !hasPlan(primaryShip.name)) {
     const MIN_SAVIOR_WARP = Math.max(200, cfg.fuelCriticalWarp * 2 + 100);
-    const savior = ships
+    // Prefer an idle savior; only bump an active corp ship off its task if no
+    // idle option has enough fuel. Primary-fuel emergency is the only thing
+    // that justifies interrupting a running corp task.
+    const fuelCandidates = ships
       .filter((c) => !c.primary && c.warpPower != null && c.warpPower >= MIN_SAVIOR_WARP && !hasPlan(c.name))
-      .sort((a, b) => (b.warpPower || 0) - (a.warpPower || 0))[0];
+      .sort((a, b) => (b.warpPower || 0) - (a.warpPower || 0));
+    const savior = fuelCandidates.find((c) => c.active !== true) || fuelCandidates[0];
     if (savior) {
       const key = `primary-revive:${primaryShip.name}`;
       if (canAct(key, cfg.rescueCooldownSec * 1000)) {
@@ -511,6 +641,11 @@ const decide = (snapshot) => {
     if (!ceo && !s.primary) continue; // non-CEO: don't touch corp ships
     // Primary emergency already handled above — don't double-prompt it.
     if (s.primary && s.warpPower < cfg.fuelCriticalWarp) continue;
+    // Probes are disposable: strategy.md §7 says run them dry and remote-sell
+    // from the primary's next megaport visit. Don't rescue, don't route to
+    // refuel — the probe-replacement decision below owns stranded probes.
+    // Refuelers are an exception (they need warp to rescue other ships).
+    if (shipKind(s.name) === 'probe' && probeRole(s.name) !== 'refueler') continue;
     if (s.warpPower < cfg.fuelCriticalWarp) {
       // FAST PATH: ship is already docked at a megaport. No rescue needed —
       // just recharge in place (primary funds it first if broke). This avoids
@@ -523,27 +658,18 @@ const decide = (snapshot) => {
         }
         continue;
       }
-      // Stranded in space. transfer_warp_power is a single interactive call —
-      // doesn't need a task slot. Refueler dispatch *is* a multi-step trip
-      // (route → transfer → return) so it takes a slot.
-      const targetIsRefueler = refueler && s.name === refueler.name;
-      if (refuelerAvailable && !targetIsRefueler) {
-        const key = `refueler-dispatch:${s.name}`;
+      // Stranded in space. Fire the generic rescue prompt only when at least
+      // one corpmate still has enough warp to help AND is available (idle,
+      // not under a plan). Otherwise the prompt is a no-op that confuses the
+      // agent (the overnight failure mode: 5 of 6 ships dry, no corpmate to
+      // transfer from — or the only fueled corpmate is mid-trade).
+      const anyCorpmateAvailable = ships.some((c) => !c.primary && c.name !== s.name
+        && c.warpPower != null && c.warpPower >= Math.max(200, cfg.minWarp * 2)
+        && c.active !== true && !hasPlan(c.name));
+      if (anyCorpmateAvailable) {
+        const key = `rescue:${s.name}`;
         if (canAct(key, cfg.rescueCooldownSec * 1000)) {
-          pushTaskDecision({ key, ship: refueler.name, text: refuelerDispatchPrompt(refueler.name, s.name, s.sector, s.warpPower) });
-        }
-      } else {
-        // No dedicated refueler available. Only fire the rescue prompt when
-        // at least one corpmate still has enough warp to help — otherwise the
-        // prompt is a no-op that confuses the agent (the overnight failure
-        // mode: 5 of 6 ships dry, no corpmate to transfer from).
-        const anyCorpmateFueled = ships.some((c) => !c.primary && c.name !== s.name
-          && c.warpPower != null && c.warpPower >= Math.max(200, cfg.minWarp * 2));
-        if (anyCorpmateFueled) {
-          const key = `rescue:${s.name}`;
-          if (canAct(key, cfg.rescueCooldownSec * 1000)) {
-            pushInteractive({ key, ship: s.name, text: rescueStrandedPrompt(s.name, s.sector, s.warpPower) });
-          }
+          pushInteractive({ key, ship: s.name, text: rescueStrandedPrompt(s.name, s.sector, s.warpPower) });
         }
       }
     } else {
@@ -561,11 +687,52 @@ const decide = (snapshot) => {
       const isMoving = prevWarp != null && s.warpPower < prevWarp;
       if (s.warpPower < threshold && !isMoving) {
         if (slotBudget > 0) {
-          const plan = buildRefuelPlan(s, { creditsForRefuel: cfg.creditsForRefuel });
+          const plan = buildRefuelPlan(s, { creditsForRefuel: cfg.creditsForRefuel, megaports: megaportSectors() });
           slotBudget -= 1;
           out.push({ key: `plan-create:refuel:${s.name}`, ship: s.name, createPlan: plan, createsTask: true });
         }
       }
+    }
+  }
+
+  // Probe replacement: when a non-refueler probe is idle with warp too low to
+  // re-dispatch (under dispatchMinWarp), fire a one-shot prompt telling the
+  // primary to remote-sell + repurchase. strategy.md §7: sell_ship only
+  // checks the caller's personal-ship location — the probe can be anywhere,
+  // including stranded at 0 warp in neutral space. The prompt includes a
+  // "travel to megaport first if needed" clause so it works whether the
+  // primary is docked or mid-trade. Net cost is ~0 (sell refund covers new
+  // probe), and the fresh probe comes with full warp.
+  //
+  // Guard: if the probe is holding salvage credits (credits > 0), skip
+  // auto-replace and log a notice — the user may want to inspect or keep the
+  // ship_id alive. sell_ship DOES refund those credits, so this guard is
+  // conservative; remove it if you want fully-automatic recycling.
+  // Only scrap a probe when it's effectively DRY (≤10 warp). Residual warp
+  // is wasted credits on sell (sell refund is hull-based, not fuel-based),
+  // so we keep re-dispatching probes until they burn through. The dispatch
+  // loop uses PROBE_MIN_DISPATCH_WARP=10 so probes with 10-199 warp keep
+  // getting new tasks — only when they hit the near-zero floor do we sell.
+  if (ceo && cfg.enabled.refuel && primaryShip) {
+    const SCRAP_WARP_CEILING = 10;
+    const primaryAtMegaport = primaryShip.sector != null && megaportSet.has(primaryShip.sector);
+    for (const s of ships) {
+      if (s.primary) continue;
+      if (shipKind(s.name) !== 'probe') continue;
+      if (probeRole(s.name) === 'refueler') continue;
+      if (s.warpPower == null || s.warpPower > SCRAP_WARP_CEILING) continue;
+      if (s.active === true) continue; // still executing a task — wait for it to end
+      if (hasPlan(s.name)) continue;
+      // sell_ship refunds both the hull value AND any credits the probe is
+      // holding, so salvage funds are recovered automatically by the sell.
+      // The replace prompt flags the credit amount for visibility.
+      const key = `probe-replace:${s.name}`;
+      if (!canAct(key, cfg.rescueCooldownSec * 1000)) continue;
+      pushInteractive({
+        key,
+        ship: primaryShip.name,
+        text: probeReplacePrompt(s.name, s.sector, s.warpPower, primaryAtMegaport, homeHub(), s.credits)
+      });
     }
   }
 
@@ -586,14 +753,29 @@ const decide = (snapshot) => {
   const skipCorpWork = !ceo;
   const corpShips = ships.filter((s) => !s.primary);
   const activeCorp = corpShips.filter((s) => s.active === true);
-  // Idle ships must have enough warp to meaningfully execute a new task AND
-  // return home safely. dispatchMinWarp guards against stranding.
-  const idleCorp = corpShips.filter((s) => s.active === false && s.warpPower != null && s.warpPower >= (cfg.dispatchMinWarp ?? cfg.minWarp));
-
   const activeProbeCount = activeCorp.filter((s) => shipKind(s.name) === 'probe').length;
-  // Refuelers are managed by the rescue flow above — don't dispatch them on explore/salvage.
-  const idleProbes = idleCorp.filter((s) => shipKind(s.name) === 'probe' && probeRole(s.name) !== 'refueler');
-  const idleHaulers = idleCorp.filter((s) => ['hauler', 'trader-light'].includes(shipKind(s.name)));
+
+  // Idle ships must have enough warp to meaningfully execute a new task.
+  // Haulers/traders use dispatchMinWarp (~200) so they don't strand mid-trade.
+  // Probes use a much lower floor (10 warp) — the explorer's directive is
+  // literally to run dry, so we want to keep re-dispatching it on every leftover
+  // drop of warp until it hits 0, at which point the probe-replace path
+  // scraps it. Anything below 10 is too low to be productive.
+  const PROBE_MIN_DISPATCH_WARP = 10;
+  const haulerMinWarp = cfg.dispatchMinWarp ?? cfg.minWarp;
+  const idleProbes = corpShips.filter((s) =>
+    s.active === false
+    && shipKind(s.name) === 'probe'
+    && s.warpPower != null
+    && s.warpPower >= PROBE_MIN_DISPATCH_WARP
+  );
+  const idleHaulers = corpShips.filter((s) =>
+    s.active === false
+    && ['hauler', 'trader-light'].includes(shipKind(s.name))
+    && s.warpPower != null
+    && s.warpPower >= haulerMinWarp
+  );
+  const idleCorp = [...idleProbes, ...idleHaulers];
 
   idleHaulers.sort((a, b) => (b.warpPower || 0) - (a.warpPower || 0));
   idleProbes.sort((a, b) => (b.warpPower || 0) - (a.warpPower || 0));
@@ -607,23 +789,36 @@ const decide = (snapshot) => {
   );
   let remainingSlots = Math.max(0, effectiveCorpCap - activeCorp.length);
 
-  // Balanced fleet allocation: cfg.probeSlots probes exploring + cfg.tradeSlots
-  // haulers trading. Probes and haulers each get their own quota so one type
-  // doesn't starve the other of task slots.
-  //
-  // Probe dispatch: fill up to probeSlots. When no rescue is pending, the
-  // refueler is also eligible for exploration (the user repurposes it to
-  // explore when no ship needs fuel).
+  // Probe dispatch: fleet has two active probe roles:
+  //   - explorer  → pushes into unknown space until dry; remote-sold at primary's next megaport visit
+  //   - refueler  → patrols fedspace-edge for salvage, self-refuels on find
+  // probeSlots caps concurrent probe tasks (typically 2).
   const probeTarget = cfg.probeSlots ?? 2;
   const allIdleProbes = idleCorp.filter((s) => shipKind(s.name) === 'probe');
   allIdleProbes.sort((a, b) => (b.warpPower || 0) - (a.warpPower || 0));
-  const needsRescue = out.some((d) => d.key?.startsWith('rescue:') || d.key?.startsWith('refueler-dispatch:'));
+  const needsRescue = out.some((d) => d.key?.startsWith('rescue:'));
   let probesSent = activeProbeCount;
+
+  // Load the sector map once per tick if any *explorer* probe will be
+  // dispatched (BFS computes its starting frontier). Refuelers don't need
+  // the map — they patrol the fedspace rim which the agent already knows.
+  let mapSectors = null;
+  const explorerProbesEligible = allIdleProbes.filter((p) => probeRole(p.name) !== 'refueler').slice(0, probeTarget);
+  if (!skipCorpWork && cfg.enabled.explore && explorerProbesEligible.length > 0) {
+    const map = await getMapSectors().catch((e) => ({ ok: false, error: e.message }));
+    if (map.ok) mapSectors = map.sectors;
+    else appendLog({ type: 'event', intelType: 'map-fetch-failed', snippet: map.error });
+  }
+  const assignedFrontiers = new Set();
 
   // Credit-seeding guard: if an idle corp ship is at the home hub with less
   // than shipFundingFloor credits, fund it before dispatch. Skip dispatch this
   // tick — next tick the ship will have credits and can be dispatched then.
+  // transfer_credits only works when both ships are docked at the same
+  // megaport, so primary must also be at the hub — otherwise the fund prompt
+  // silently fails at the game layer and burns its cooldown.
   const fundingFloor = cfg.shipFundingFloor ?? cfg.creditsForRefuel ?? 1000;
+  const primaryCanFund = primaryAvailable && primaryShip.sector === homeHub();
   const needsFunding = (s) =>
     s.credits != null &&
     s.credits < fundingFloor &&
@@ -636,29 +831,38 @@ const decide = (snapshot) => {
     if (remainingSlots <= 0) break;
     if (!cfg.enabled.explore) break;
     if (hasPlan(probe.name)) continue;
-    // Refueler probe is rescue-only: never dispatch it on generic exploration
-    // (that would pull it out of federation space and out of rescue range).
-    // It stays parked at hub until the rescue flow needs it — at which point
-    // refuelerDispatchPrompt sends it out, and it may leave fedspace just long
-    // enough to reach the stranded ship, then returns.
-    if (probeRole(probe.name) === 'refueler') continue;
-    // Fund first if at hub and broke — probes don't generally carry credits
-    // but may need some for recharge_warp_power on return trips.
+    const role = probeRole(probe.name);
+    // Fund first if at hub and broke. Refueler especially needs operating
+    // credits (it pays for its own recharge_warp_power from salvage/seed).
     if (needsFunding(probe)) {
+      if (!primaryCanFund) continue; // primary not co-located/idle — wait
       const key = `fund:${probe.name}`;
       if (canAct(key, cfg.refuelCooldownSec * 1000)) {
         pushInteractive({ key, ship: probe.name, text: shipFundPrompt(probe.name, probe.credits, fundingFloor) });
       }
       continue; // skip dispatch this tick
     }
-    const role = probeRole(probe.name);
     const key = `${role || 'explore'}:${probe.name}`;
     if (!canAct(key, cooldownMs)) continue;
     let text;
-    if (role === 'explorer') text = explorerPrompt(probe.name, cfg.exploreMaxHops);
-    else if (role === 'scavenger') text = scavengerPrompt(probe.name, cfg.exploreMaxHops);
-    else if (role === 'refueler') text = probeExplorePrompt(probe.name, cfg.exploreMaxHops);
-    else text = probeExplorePrompt(probe.name, cfg.exploreMaxHops);
+    if (role === 'refueler') {
+      // Refueler patrols the fedspace rim — no frontier BFS, no unknown-space
+      // targeting. The edge-patrol prompt describes its self-refuel cycle.
+      text = refuelerEdgePatrolPrompt(probe.name);
+    } else {
+      // Explorer/scavenger/unknown: compute nearest unvisited frontier hex
+      // from the probe's current sector via BFS through visited space.
+      // Frontiers already assigned to other probes this tick are excluded.
+      let frontier = null;
+      if (mapSectors && probe.sector != null) {
+        frontier = findNearestFrontier(mapSectors, probe.sector, assignedFrontiers);
+        if (frontier) assignedFrontiers.add(frontier.sector);
+      }
+      const target = frontier?.sector ?? null;
+      if (role === 'explorer') text = explorerPrompt(probe.name, target);
+      else if (role === 'scavenger') text = scavengerPrompt(probe.name, target);
+      else text = probeExplorePrompt(probe.name, target);
+    }
     if (pushTaskDecision({ key, ship: probe.name, text })) {
       remainingSlots -= 1;
       probesSent += 1;
@@ -678,6 +882,7 @@ const decide = (snapshot) => {
     if (hasPlan(hauler.name)) continue;
     // Fund first if broke at hub — haulers especially need trading capital.
     if (needsFunding(hauler)) {
+      if (!primaryCanFund) continue; // primary not co-located/idle — wait
       const key = `fund:${hauler.name}`;
       if (canAct(key, cfg.refuelCooldownSec * 1000)) {
         pushInteractive({ key, ship: hauler.name, text: shipFundPrompt(hauler.name, hauler.credits, fundingFloor) });
@@ -700,10 +905,24 @@ const decide = (snapshot) => {
     // Player on-hand (comes from the top-bar, not the per-ship credits field).
     const onHand = ex.creditsOnHand ?? 0;
     const excess = onHand - cfg.onHandFloor;
-    if (excess >= cfg.depositExcessOver) {
+    // Hard floor: never sweep until the primary is clearly carrying excess
+    // risk (>10k on-hand). Guards against drifted config values — if
+    // someone sets onHandFloor low and depositExcessOver low, this prevents
+    // a spurious sweep from firing on trivial balances.
+    const BANK_SWEEP_MIN_ON_HAND = 10_000;
+    if (onHand > BANK_SWEEP_MIN_ON_HAND && excess >= cfg.depositExcessOver) {
       const key = 'bank:sweep';
-      if (canAct(key, cooldownMs)) {
-        pushInteractive({ key, text: bankSweepPrompt(excess, onHand, cfg.onHandFloor) });
+      // The agent rejects banking as an interactive action ("requires a
+      // dedicated task"), so dispatch this as a task. Gating on
+      // primaryAvailable keeps the sweep from landing on an active trade
+      // loop — the prompt's "resume your previous activity" suffix is
+      // unreliable when the agent is mid-task.
+      if (primaryAvailable && canAct(key, cooldownMs)) {
+        pushTaskDecision({
+          key,
+          ship: primaryName,
+          text: bankSweepPrompt(primaryName, excess, onHand, cfg.onHandFloor)
+        });
       }
     }
 
@@ -744,18 +963,31 @@ const decide = (snapshot) => {
   }
 
   // Keep the local task engine (primary ship) slot in use.
-  // We can tell from DOM whether the Kestrel already has a task: the task cards
-  // list every working task, and corp ships mark themselves ACTIVE in the fleet
-  // panel. If workingTaskCount > activeCorpShips, the extra task is the primary's.
+  // Prefer the DOM's "N/M SLOTS USED" counter — it's authoritative and covers
+  // the primary's local slot. Scraped ENGINE STATUS cards can briefly drop the
+  // WORKING flag during handoff, which caused spurious re-dispatch on top of
+  // an already-running primary task.
   if (cfg.enabled.primary && ex.shipName) {
     const primary = ships.find((s) => s.primary);
     const workingTaskCount = (ex.tasks || []).filter((t) => t.working).length;
     const activeCorpCount = activeCorp.length;
-    const primaryHasTask = workingTaskCount > activeCorpCount;
+    const primaryTaskCount = ex.taskSlots?.used != null
+      ? Math.max(0, ex.taskSlots.used - activeCorpCount)
+      : Math.max(0, workingTaskCount - activeCorpCount);
+    const primaryHasTask = primaryTaskCount > 0;
+
+    // Probe-replace race guard: if any probe-replace was dispatched in the
+    // last 3 min, the primary is likely mid-sequence (route → sell → buy →
+    // start_task). Don't hand it a new trade task on top of that — it causes
+    // the agent to drop the replacement mid-flight.
+    const now = Date.now();
+    const probeReplaceRecent = [...state.lastDecisionAt.entries()]
+      .some(([k, ts]) => k.startsWith('probe-replace:') && (now - ts) < 3 * 60_000);
 
     if (
       primary &&
       !primaryHasTask &&
+      !probeReplaceRecent &&
       primary.warpPower != null &&
       // Use dispatchMinWarp (~200) not minWarp (~50): at 50 warp the primary
       // could start a trade loop and strand itself mid-hop before returning
@@ -872,6 +1104,9 @@ const runTick = async () => {
     // so we can auto-reissue on task-max-steps — the game caps any autonomous
     // task at 100 steps, so long-haul travel halts mid-transit.
     const shipsNow = snapshot?.extracted?.ships || [];
+    // Shared critical-warp scan: reused by the auto-confirm crisis guard and
+    // the deadlock detector below so we don't walk the fleet twice per tick.
+    const criticalCount = shipsNow.filter((s) => s.warpPower != null && s.warpPower < state.config.fuelCriticalWarp).length;
     const newIntents = parseTravelIntents(snapshot);
     for (const t of newIntents) {
       state.travelIntents.set(t.ship, { sector: t.sector, issuedAt: Date.now(), msgTs: t.msgTs });
@@ -901,18 +1136,25 @@ const runTick = async () => {
       }
       // Auto-resume travel: 100-step cap halted the ship mid-transit. If we
       // tracked the user's destination and the ship isn't there yet, reissue.
+      // Non-CEO autopilots only resume the primary — corp ships live on shared
+      // task slots owned by the CEO's autopilot.
       if (ev.type === 'task-max-steps' || ev.type === 'task-aborted') {
         const intent = state.travelIntents.get(ev.ship);
-        if (intent) {
+        if (intent && (state.config?.isCeo || ev.isPrimary)) {
           const s = shipsNow.find((x) => x.name === ev.ship);
           const arrived = s && s.sector === intent.sector;
           if (arrived) {
             state.travelIntents.delete(ev.ship);
             appendLog({ type: 'event', intelType: 'travel-intent-fulfilled', ship: ev.ship, sector: intent.sector });
+          } else if (s && s.warpPower != null && s.warpPower < state.config.minWarp) {
+            // Don't push a low-fuel ship further — the refuel guard in decide()
+            // will route it to a megaport. Intent is retained so we can resume
+            // travel after refueling.
+            appendLog({ type: 'event', intelType: 'auto-travel-resume-skip', ship: ev.ship, sector: intent.sector, snippet: `warp ${s.warpPower} below ${state.config.minWarp} — refuel first` });
           } else {
             const key = `travel-resume:${ev.ship}:${intent.sector}:${ev.msgTs || Date.now()}`;
             if (!state.seenEventKeys.has(key)) {
-              state.seenEventKeys.add(key);
+              markSeen(key);
               const prompt = `continue ${ev.ship} to sector ${intent.sector}, plot_course, dock on arrival, execute now`;
               sendAssistantPrompt(prompt).catch(() => {});
               appendLog({ type: 'event', intelType: 'auto-travel-resume', ship: ev.ship, sector: intent.sector, snippet: prompt });
@@ -944,12 +1186,23 @@ const runTick = async () => {
       const isAskingForApproval = endsWithQuestion || explicitAsk;
       const lastUserMsg = [...msgs].reverse().find((m) => m && /USER[:\s]/i.test(m));
       const userAlreadyReplied = lastUserMsg && msgs.indexOf(lastUserMsg) > msgs.indexOf(lastAssistantMsg);
-      if (isAskingForApproval && !userAlreadyReplied) {
+      // Crisis guard: if any ship is at critical warp, skip auto-confirm. The
+      // agent's pending action could easily be wrong in a fuel crisis (e.g.
+      // it may be asking to trade when what we actually need is a rescue). A
+      // human should make the call rather than a blanket "yes, proceed".
+      const fleetInCrisis = criticalCount > 0;
+      if (isAskingForApproval && !userAlreadyReplied && !fleetInCrisis) {
         const key = `auto-confirm:${lastAssistantMsg.slice(0, 60)}`;
         if (!state.seenEventKeys.has(key)) {
-          state.seenEventKeys.add(key);
+          markSeen(key);
           await sendAssistantPrompt('yes, proceed').catch(() => {});
           appendLog({ type: 'event', intelType: 'auto-confirm', snippet: lastAssistantMsg.slice(0, 120) });
+        }
+      } else if (isAskingForApproval && !userAlreadyReplied && fleetInCrisis) {
+        const key = `auto-confirm-skip:${lastAssistantMsg.slice(0, 60)}`;
+        if (!state.seenEventKeys.has(key)) {
+          markSeen(key);
+          appendLog({ type: 'event', intelType: 'auto-confirm-skip', snippet: `fleet in critical-warp state — human confirmation required: ${lastAssistantMsg.slice(0, 100)}` });
         }
       }
     }
@@ -958,7 +1211,7 @@ const runTick = async () => {
     // actions and suppress one-shot decide() dispatches for the same ship.
     await processPlans(snapshot);
 
-    const decisions = decide(snapshot);
+    const decisions = await decide(snapshot);
 
     // Record current warp per ship so next tick can detect in-flight movement.
     for (const s of (snapshot?.extracted?.ships || [])) {
@@ -967,9 +1220,8 @@ const runTick = async () => {
 
     // Deadlock detector: if ≥2 ships stay at critical warp for ≥5 consecutive
     // ticks, fire an AI advisor run to suggest a recovery plan. 30-minute
-    // cooldown on the dispatch so we don't spam the LLM.
-    const criticalCount = (snapshot?.extracted?.ships || [])
-      .filter((s) => s.warpPower != null && s.warpPower < state.config.fuelCriticalWarp).length;
+    // cooldown on the dispatch so we don't spam the LLM. criticalCount was
+    // computed once at the top of the tick and reused here.
     if (criticalCount >= 2) state.stuckTicks += 1;
     else state.stuckTicks = 0;
     const STUCK_THRESHOLD = 5;
@@ -1011,12 +1263,20 @@ const runTick = async () => {
     });
 
     // Guards: one action per ship per tick, and a global cap to avoid
-    // flooding the agent's input with back-to-back prompts.
+    // flooding the agent's input with back-to-back prompts. When more than
+    // one prompt fires in the same tick, we also pace them apart — the game
+    // agent drops commands that arrive before it finishes the previous one.
     const maxPerTick = state.config.maxDecisionsPerTick ?? 2;
+    const interPromptDelayMs = state.config.interPromptDelayMs ?? 12_000;
     const shipsPrompted = new Set();
     let promptsSent = 0;
 
     for (const d of decisions) {
+      // Pace consecutive prompts: first send immediately, subsequent ones
+      // wait for the agent to finish the previous command.
+      if (promptsSent > 0 && interPromptDelayMs > 0) {
+        await new Promise((r) => setTimeout(r, interPromptDelayMs));
+      }
       if (promptsSent >= maxPerTick) {
         appendLog({ type: 'decision', key: d.key, ship: d.ship, text: '(deferred — hit per-tick cap)', skipped: true });
         continue;
@@ -1077,10 +1337,19 @@ const runTick = async () => {
 
 export const startAutopilot = (config = {}) => {
   if (state.running) return { ok: false, error: 'already running' };
+  // Merge order: codebase defaults → client/UI config → per-user overrides.
+  // Overrides win so local state (e.g. isCeo, homeHub) doesn't get clobbered
+  // by a fresh UI load on a different browser.
+  const overrides = loadUserOverrides();
   state.config = {
     ...DEFAULTS,
     ...config,
-    enabled: { ...DEFAULTS.enabled, ...(config.enabled || {}) }
+    ...overrides,
+    enabled: {
+      ...DEFAULTS.enabled,
+      ...(config.enabled || {}),
+      ...(overrides.enabled || {})
+    }
   };
   // Guard: homeHub must be one of the known megaports. A stale localStorage
   // value (or typo in the UI) could otherwise send the fleet to an invalid
@@ -1156,7 +1425,10 @@ export const startFleetRally = async (opts = {}) => {
     return { ok: false, error: 'fleet rally already in progress' };
   }
   // The plan machinery only advances when the autopilot tick is running.
+  // Start it first so config/overrides are loaded before the CEO check.
   if (!state.running) startAutopilot({});
+  const denial = requireCeo('fleet rally');
+  if (denial) return denial;
   const resume = opts.resume !== false;
   const { plan, ships, error } = await buildLiveRallyPlan({ resume });
   if (error) return { ok: false, error };
@@ -1191,6 +1463,8 @@ export const startFleetRally = async (opts = {}) => {
  * keep the agent from asking for confirmation in the first place.
  */
 export const fireRallyStep = async (stepName) => {
+  const denial = requireCeo('rally step');
+  if (denial) return denial;
   if (stepName === 'fund-for-recharge') return queueFundSequence();
   if (stepName === 'credit-balance') return queueBalanceSequence();
   const { plan, ships, error } = await buildLiveRallyPlan({ resume: true });
@@ -1245,27 +1519,75 @@ const freshSnapshot = async () => {
   return snap;
 };
 
+// Task slots are shared across every corp member, so any command that touches
+// a non-primary ship must be CEO-gated — otherwise two players' autopilots
+// trample each other's dispatches. When the flag isn't set we refuse the op
+// outright rather than silently no-op, so the UI can surface the reason.
+const requireCeo = (label) => {
+  if (state.config?.isCeo) return null;
+  return { ok: false, error: `${label} requires CEO mode — non-CEO autopilots must not command corp ships` };
+};
+
+// Shared precondition for one-shot credit sequences — transfer_credits
+// silently fails at the game layer unless both ships share a sector, so we
+// refuse to queue the sequence when the primary isn't docked and idle.
+const assertPrimaryReady = (primary, label) => {
+  if (primary == null || primary.sector == null) {
+    return { ok: false, error: `primary ship sector unknown — dock the primary before running ${label}` };
+  }
+  if (primary.active === true) {
+    return { ok: false, error: `primary ship is mid-task — wait for it to dock before running ${label}` };
+  }
+  return { ok: true };
+};
+
+const coLocationReason = (ship, primarySector) => {
+  if (ship.sector === primarySector) return null;
+  return ship.sector == null ? 'sector unknown' : `at sector ${ship.sector}, primary at ${primarySector}`;
+};
+
+const logSkipped = (key, skipped) => {
+  if (!skipped.length) return;
+  appendLog({
+    type: 'decision',
+    key,
+    ship: FLEET_PLAN_KEY,
+    text: `skipping non-co-located ships: ${skipped.map((x) => `${x.name} (${x.reason})`).join(', ')}`
+  });
+};
+
 /**
  * Fund each corp ship as a separate primary-ship action. One bank_withdraw
  * up front, then one transfer_credits per underfunded ship.
  */
 export const queueFundSequence = async () => {
+  const denial = requireCeo('fund sequence');
+  if (denial) return denial;
   if (queueRunning['fund-seq']) return { ok: false, error: 'fund sequence already running' };
   const snap = await freshSnapshot();
   const ships = snap?.extracted?.ships || [];
   if (ships.length === 0) return { ok: false, error: 'no ships in snapshot — is CDP connected?' };
   const primary = ships.find((s) => s.primary);
   const primaryName = primary?.name || 'the primary ship';
+  const ready = assertPrimaryReady(primary, 'fund sequence');
+  if (!ready.ok) return ready;
   const onHand = snap.extracted.creditsOnHand ?? 0;
   const keepFloor = state.config?.onHandFloor ?? 1000;
 
   const transfers = [];
+  const skipped = [];
   for (const s of ships) {
     if (s.primary) continue;
-    if (s.credits != null && s.credits < 1000) transfers.push({ name: s.name, amount: 1000 - s.credits });
-    else if (s.credits == null) transfers.push({ name: s.name, amount: 1000 });
+    const needs = (s.credits != null && s.credits < 1000) || s.credits == null;
+    if (!needs) continue;
+    const reason = coLocationReason(s, primary.sector);
+    if (reason) { skipped.push({ name: s.name, reason }); continue; }
+    const amount = s.credits == null ? 1000 : 1000 - s.credits;
+    transfers.push({ name: s.name, amount });
   }
-  if (transfers.length === 0) return { ok: true, queued: 0, note: 'no corp ships need funding' };
+  if (transfers.length === 0) {
+    return { ok: true, queued: 0, note: skipped.length ? 'no co-located corp ships need funding' : 'no corp ships need funding', skipped };
+  }
 
   const totalTransfer = transfers.reduce((sum, t) => sum + t.amount, 0);
   const withdrawNeeded = Math.max(0, totalTransfer + keepFloor - onHand);
@@ -1279,6 +1601,7 @@ export const queueFundSequence = async () => {
   }
 
   drainQueue('fund-seq', prompts);
+  logSkipped('fund-seq', skipped);
 
   return {
     ok: true,
@@ -1286,7 +1609,8 @@ export const queueFundSequence = async () => {
     queued: prompts.length,
     totalTransfer,
     withdrawNeeded,
-    transfers
+    transfers,
+    skipped
   };
 };
 
@@ -1298,22 +1622,29 @@ export const queueFundSequence = async () => {
  *   4. primary bank_deposits anything above its own floor
  */
 export const queueBalanceSequence = async () => {
+  const denial = requireCeo('balance sequence');
+  if (denial) return denial;
   if (queueRunning['balance-seq']) return { ok: false, error: 'balance sequence already running' };
   const snap = await freshSnapshot();
   const ships = snap?.extracted?.ships || [];
   if (ships.length === 0) return { ok: false, error: 'no ships in snapshot — is CDP connected?' };
   const primary = ships.find((s) => s.primary);
   const primaryName = primary?.name || 'the primary ship';
+  const ready = assertPrimaryReady(primary, 'balance sequence');
+  if (!ready.ok) return ready;
   const onHand = snap.extracted.creditsOnHand ?? 0;
   const keepCredits = state.config?.onHandFloor ?? 1000;
 
   const sweeps = [];
   const topUps = [];
   const unknowns = [];
+  const skipped = [];
   for (const s of ships) {
     if (s.primary) continue;
-    if (s.credits == null) unknowns.push(s.name);
-    else if (s.credits > keepCredits) sweeps.push({ name: s.name, amount: s.credits - keepCredits });
+    if (s.credits == null) { unknowns.push(s.name); continue; }
+    const reason = coLocationReason(s, primary.sector);
+    if (reason) { skipped.push({ name: s.name, reason }); continue; }
+    if (s.credits > keepCredits) sweeps.push({ name: s.name, amount: s.credits - keepCredits });
     else if (s.credits < keepCredits) topUps.push({ name: s.name, amount: keepCredits - s.credits });
   }
 
@@ -1343,8 +1674,9 @@ export const queueBalanceSequence = async () => {
   if (unknowns.length) {
     appendLog({ type: 'decision', key: 'balance-seq', ship: FLEET_PLAN_KEY, text: `skipping unknown-balance ships (DOM scrape returned null): ${unknowns.join(', ')}` });
   }
+  logSkipped('balance-seq', skipped);
 
-  if (prompts.length === 0) return { ok: true, queued: 0, note: 'all corp ships already at floor' };
+  if (prompts.length === 0) return { ok: true, queued: 0, note: 'no co-located corp ships need balancing', skipped };
 
   drainQueue('balance-seq', prompts);
 
@@ -1357,7 +1689,8 @@ export const queueBalanceSequence = async () => {
     withdrawNeeded,
     sweeps,
     topUps,
-    unknowns
+    unknowns,
+    skipped
   };
 };
 

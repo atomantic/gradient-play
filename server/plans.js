@@ -70,21 +70,33 @@ const isProbe = (ship) => /PROBE/i.test(ship.name || '');
  *   3. recharge-warp     — top up warp
  *   4. resume            — put ship back on its role-appropriate task
  */
-export const buildRefuelPlan = (ship, { creditsForRefuel = 1000 } = {}) => {
+export const buildRefuelPlan = (ship, { creditsForRefuel = 1000, megaports = [] } = {}) => {
   const shipCredits = ship.credits ?? 0;
   const needsCredits = shipCredits < creditsForRefuel;
   const initialWarp = ship.warpPower ?? 0;
   const maxWarp = warpMaxOf(ship);
+  const megaportSet = new Set(megaports);
   const steps = [];
 
   steps.push({
     name: 'route-to-megaport',
-    prompt: `${ship.name} is low on warp. break it off any active task and route to the nearest megaport. just dock — no trading on the way.`,
+    prompt: `send ${ship.name} to the nearest megaport to refuel.`,
     nagMs: 120_000,
     maxMs: 7 * 60_000,
-    // Heuristic: the ship is idle and its warp has stopped decreasing for one
-    // tick (no movement in-flight). Tracked via context.lastWarp.
     isDone: (_snap, s, p) => {
+      // Already parked at a known megaport? Skip the routing step — no point
+      // telling a docked hauler to "go to a megaport". The pre-advance loop
+      // in autopilot runs isDone at plan creation time, so this also skips
+      // the prompt entirely when we catch the ship already docked.
+      if (s.sector != null && megaportSet.has(s.sector)) return true;
+      // Early exit: if the ship is already at full warp (e.g. user manually
+      // refueled, or another flow handled it), the refuel plan is moot —
+      // advance through the rest of the plan to the resume step. Prevents
+      // "send hauler to megaport to refuel" firing at a full-fuel ship.
+      const cap = s.warpMax ?? warpMaxOf(s);
+      if (s.warpPower != null && s.warpPower >= cap * 0.9) return true;
+      // Heuristic: the ship is idle and its warp has stopped decreasing for
+      // one tick (no movement in-flight). Tracked via context.lastWarp.
       const prev = p.context.lastWarp;
       p.context.lastWarp = s.warpPower;
       if (s.active !== false) return false;
@@ -225,10 +237,24 @@ export const buildFleetRallyPlan = (ships = [], { keepCredits = 1000, megaports 
     }
   });
 
-  // Step 4: recharge
+  // Step 4: recharge — only name ships that actually need it. Ships already
+  // at ≥90% of class max are skipped so the agent doesn't waste an action
+  // (and credits) topping off a full tank.
+  const rechargeNeeded = ships.filter((s) => {
+    if (s.warpPower == null) return true; // unknown — include to be safe
+    const max = s.warpMax ?? warpMaxOf(s);
+    return s.warpPower < max * 0.9;
+  });
+  const rechargeFull = ships
+    .filter((s) => s.warpPower != null && s.warpPower >= (s.warpMax ?? warpMaxOf(s)) * 0.9)
+    .map((s) => s.name);
+  const rechargeNames = rechargeNeeded.map((s) => s.name).filter(Boolean);
+  const rechargeBody = rechargeNames.length
+    ? `recharge_warp_power to full on: ${rechargeNames.join(', ')}. up to 3 in parallel.${rechargeFull.length ? ` already full, SKIP: ${rechargeFull.join(', ')}.` : ''}`
+    : 'all ships already at full warp — nothing to recharge, no actions needed';
   steps.push({
     name: 'recharge',
-    prompt: `recharge_warp_power on every ship to full. fleet: ${fleetLabel}. up to 3 in parallel.${EXEC_NOW}`,
+    prompt: `${rechargeBody}${EXEC_NOW}`,
     nagMs: 90_000,
     maxMs: 5 * 60_000,
     isDone: (snap) => {
@@ -281,7 +307,7 @@ export const buildFleetRallyPlan = (ships = [], { keepCredits = 1000, megaports 
   // Step 6: resume (optional — skip for "Home Base" which parks the fleet)
   if (resume) steps.push({
     name: 'resume',
-    prompt: `dispatch each ship to its role task. haulers: short fedspace NS trade loops. probes/explorer: explore-salvage. scavenger: salvage. refueler: park. primary: fedspace trade loop.${EXEC_NOW}`,
+    prompt: `dispatch each ship. haulers/primary: NS fedspace loops, 2-3 hops, max cr/warp, stagger to avoid port overlap. probes/explorer: explore-salvage. scavenger: salvage. refueler: park.${EXEC_NOW}`,
     nagMs: 120_000,
     maxMs: 5 * 60_000,
     isDone: (snap) => {
