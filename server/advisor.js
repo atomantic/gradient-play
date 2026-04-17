@@ -114,6 +114,18 @@ export const adviseAutopilot = async ({ providerId, model, question, extraContex
 
   const provider = await aiToolkit.services.providers.getProviderById(chosenId);
   if (!provider) return { ok: false, error: `unknown provider: ${chosenId}` };
+  // CLI providers are rejected in the advisor path. The toolkit's CLI runner
+  // spawns with shell:true and doesn't escape the prompt, so the advisor's
+  // long prose (parens, quotes, shell metachars) produces /bin/sh: syntax
+  // errors before the model ever sees it. The auto-picker at the top of
+  // this function already prefers an enabled API provider — this guard
+  // catches the case where a caller explicitly supplies a CLI providerId.
+  if (provider.type === 'cli') {
+    return {
+      ok: false,
+      error: `provider "${provider.name}" is a CLI provider — advisor requires an API provider. Pick/enable an API provider (LM Studio, Ollama, Claude API, etc.) in the AI tab, or omit providerId to let the advisor auto-select one.`
+    };
+  }
   const chosenModel = model || provider.lightModel || provider.defaultModel || provider.models?.[0];
 
   const runData = await aiToolkit.services.runner.createRun({

@@ -142,7 +142,13 @@ export const AIPanel = () => {
   const runStrategyAdvisor = async () => {
     setStrategyBusy(true);
     setError(null);
-    const r = await req('POST', '/api/ai/advise-strategy', { providerId: activeId || undefined })
+    // Deliberately DO NOT pass providerId here. The server's advisor picks
+    // an enabled API provider and skips CLI providers — the toolkit's CLI
+    // runner shells out with shell:true and chokes on parens/quotes in the
+    // long strategy prompt. If the UI's "default" happens to be a CLI
+    // provider (e.g. gemini), passing it would override the API preference
+    // and cause a shell syntax error at run time.
+    const r = await req('POST', '/api/ai/advise-strategy', {})
       .catch((e) => ({ ok: false, error: e.message }));
     setStrategyBusy(false);
     if (!r.ok) { setError(r.error || 'advisor failed'); return; }
@@ -159,7 +165,11 @@ export const AIPanel = () => {
           <div className="text-xs uppercase tracking-wider text-slate-300 font-semibold">AI Providers</div>
         </div>
         <div className="flex items-center gap-1">
-          <button onClick={runStrategyAdvisor} disabled={strategyBusy || !providers.some((p) => p.enabled)}
+          <button onClick={runStrategyAdvisor}
+            disabled={strategyBusy || !providers.some((p) => p.enabled && p.type === 'api')}
+            title={providers.some((p) => p.enabled && p.type === 'api')
+              ? 'Ask the LLM to evaluate the fleet against strategy.md'
+              : 'Add and enable an API provider (CLI providers don\'t work for the advisor)'}
             className="px-2 py-1 rounded border border-sky-900 hover:border-sky-500 text-sky-300 text-xs flex items-center gap-1 disabled:opacity-40 disabled:cursor-not-allowed">
             <BookOpen className="w-3 h-3" /> {strategyBusy ? 'Running…' : 'Consult strategy'}
           </button>
