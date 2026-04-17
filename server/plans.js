@@ -137,7 +137,7 @@ export const buildRefuelPlan = (ship, { creditsForRefuel = 1000, megaports = [] 
     name: 'resume',
     prompt: isProbe(ship)
       ? `${ship.name} is fueled. resume exploration/salvage — 40 hop radius, flee combat, deposit credits at megaports.`
-      : `${ship.name} is fueled. resume a short fedspace NS trade loop, 2-3 hops.`,
+      : `${ship.name} is fueled. resume trading in fedspace, route is your call.`,
     nagMs: 120_000,
     maxMs: 3 * 60_000,
     isDone: (_snap, s) => s.active === true
@@ -307,7 +307,7 @@ export const buildFleetRallyPlan = (ships = [], { keepCredits = 1000, megaports 
   // Step 6: resume (optional — skip for "Home Base" which parks the fleet)
   if (resume) steps.push({
     name: 'resume',
-    prompt: `dispatch each ship. haulers/primary: NS fedspace loops, 2-3 hops, max cr/warp, stagger to avoid port overlap. probes/explorer: explore-salvage. scavenger: salvage. refueler: park.${EXEC_NOW}`,
+    prompt: `dispatch each ship. haulers/primary: trade in fedspace, routes are their call. probes/explorer: explore-salvage. scavenger: salvage. refueler: park.${EXEC_NOW}`,
     nagMs: 120_000,
     maxMs: 5 * 60_000,
     isDone: (snap) => {

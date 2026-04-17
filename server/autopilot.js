@@ -124,12 +124,12 @@ const haulerTradePrompt = (hauler) => {
   const route = state.config?.haulerPreferredRoute;
   if (route?.buyAt != null && route?.sellAt != null && route?.commodity) {
     const note = route.note ? ` ${route.note}.` : '';
-    return `${hauler}: PREFERRED ROUTE — buy ${route.commodity} at sector ${route.buyAt}, sell at sector ${route.sellAt}, repeat.${note} fill cargo on every buy. if stock depletes below profitability, fall back to a short fedspace NS loop. coordinate timing with fleetmate traders on the same megaport.` + standingOrders(hauler);
+    return `${hauler}: PREFERRED ROUTE — buy ${route.commodity} at sector ${route.buyAt}, sell at sector ${route.sellAt}, repeat.${note} fill cargo on every buy. if stock depletes below profitability, pick any other fedspace trade.` + standingOrders(hauler);
   }
   return pick([
-    `${hauler}: fedspace NS loop, 2-3 hops, max cr/warp. rotate on depletion, no fleetmate port overlap.`,
-    `${hauler}: 2-3 hop NS trade in fedspace. rank cr/warp, rotate routes, stagger from fleetmates.`,
-    `${hauler}: NS loop fedspace, 2-3 hops. optimize cr/warp, rotate on stock drop, avoid fleetmate ports.`
+    `${hauler}: trade in fedspace, route is your call.`,
+    `${hauler}: start trading in fedspace — pick whatever route looks best.`,
+    `${hauler}: fedspace trade run, your choice of ports.`
   ]) + standingOrders(hauler);
 };
 
@@ -179,12 +179,12 @@ const primaryTradePrompt = (primary) => {
   const route = state.config?.primaryPreferredRoute;
   if (route?.buyAt != null && route?.sellAt != null && route?.commodity) {
     const note = route.note ? ` ${route.note}.` : '';
-    return `${primary}: PREFERRED ROUTE — buy ${route.commodity} at sector ${route.buyAt}, sell at sector ${route.sellAt}, repeat.${note} if stock depletes below profitability, fall back to a short fedspace NS loop; coordinate timing with fleetmate traders on the same megaport.` + standingOrders(primary);
+    return `${primary}: PREFERRED ROUTE — buy ${route.commodity} at sector ${route.buyAt}, sell at sector ${route.sellAt}, repeat.${note} if stock depletes below profitability, pick any other fedspace trade.` + standingOrders(primary);
   }
   return pick([
-    `${primary}: fedspace NS loop, 2-3 hops, max cr/warp. rotate on depletion, no fleetmate port overlap.`,
-    `${primary}: 2-3 hop NS trade in fedspace. rank cr/warp, rotate routes, stagger from fleetmates.`,
-    `${primary}: NS loop fedspace, 2-3 hops. optimize cr/warp, rotate on stock drop, avoid fleetmate ports.`
+    `${primary}: trade in fedspace, route is your call.`,
+    `${primary}: start trading in fedspace — pick whatever route looks best.`,
+    `${primary}: fedspace trade run, your choice of ports.`
   ]) + standingOrders(primary);
 };
 
