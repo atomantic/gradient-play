@@ -28,8 +28,8 @@ module.exports = {
     {
       name: 'gradient-play-client',
       cwd: './client',
-      script: 'npx',
-      args: 'vite --host 0.0.0.0 --port 5571',
+      script: 'node_modules/vite/bin/vite.js',
+      args: '--host 0.0.0.0 --port 5571',
       watch: false,
       env: {
         NODE_ENV: 'development',
