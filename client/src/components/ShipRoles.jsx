@@ -33,7 +33,10 @@ export const ShipRoles = ({ ships }) => {
   const [pending, setPending] = useState(null); // ship.name awaiting confirm-click
   const pendingTimer = useRef(null);
 
-  const corpProbes = (ships || []).filter((s) => !s.primary && /probe/i.test(s.name || ''));
+  // Mirror server/autopilot.js shipKind() — any corp ship whose name carries
+  // a probe-class token counts, not just literal "PROBE".
+  const PROBE_RX = /probe|explorer|scavenger|salvager|scout|pathfinder|refueler|tanker|fuel/i;
+  const corpProbes = (ships || []).filter((s) => !s.primary && PROBE_RX.test(s.name || ''));
 
   const clearPending = () => {
     setPending(null);

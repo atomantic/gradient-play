@@ -108,6 +108,23 @@ const builtins = [
     }
   },
   {
+    name: 'Onboarding: sector 305 fedspace loop',
+    spec: {
+      goal: 'New-player onboarding loop anchored on megaport sector 305. First, plot_course to sector 305 and dock. Then find a short NS trade loop (2-3 hops) between sector 305 and adjacent federation ports and run it for max credits per warp. Whenever warp power drops to 50 or below, stop trading, plot_course back to sector 305, dock, and recharge_warp_power to full. Then resume the trade loop. Repeat indefinitely.',
+      guardrails: [
+        'Federation space only — never exit fedspace',
+        'Trade loops 2-3 hops, adjacent to sector 305',
+        'Prioritize NS (Neuro-Symbolics) routes for highest margin',
+        'When warp power drops to 50 or below, return to sector 305 and recharge_warp_power before trading again',
+        'Never engage combat — flee if attacked'
+      ],
+      intervalSec: 30,
+      nudgeAfterIdleSec: 270,
+      abortWhen: [],
+      stopWhen: []
+    }
+  },
+  {
     name: 'Grind tutorial to 1000 credits',
     spec: {
       goal: 'Complete the tutorial quest. Trade between adjacent ports for small profits until you have 1000 credits aggregate, then claim rewards.',

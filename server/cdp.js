@@ -298,6 +298,72 @@ export const getGameSnapshot = async () => {
 };
 
 /**
+ * Extract the full known-sector list from React fiber state. Zustand stores
+ * aren't on window, so we walk the fiber tree from #root and grab the first
+ * hook whose state is an array of sector records (id, visited, position,
+ * adjacent_sectors, lanes). Cached briefly so back-to-back dispatches don't
+ * re-walk the tree.
+ */
+let mapCache = { sectors: null, fetchedAt: 0 };
+const MAP_TTL_MS = 30_000;
+
+export const getMapSectors = async ({ maxAgeMs = MAP_TTL_MS } = {}) => {
+  const now = Date.now();
+  if (mapCache.sectors && now - mapCache.fetchedAt < maxAgeMs) {
+    return { ok: true, sectors: mapCache.sectors, cachedAt: mapCache.fetchedAt, fromCache: true };
+  }
+  let page;
+  try { page = await withPage(); } catch (err) {
+    return { ok: false, error: err.message };
+  }
+  const raw = await page.evaluate(() => {
+    const root = document.getElementById('root');
+    if (!root) return null;
+    const rootKey = Object.keys(root).find((k) => k.startsWith('__reactContainer$'));
+    if (!rootKey) return null;
+    const container = root[rootKey];
+    const hostRoot = container?.stateNode?.current || container?.current;
+    if (!hostRoot) return null;
+    const seen = new WeakSet();
+    let found = null;
+    const walk = (fiber) => {
+      if (found || !fiber || seen.has(fiber)) return;
+      seen.add(fiber);
+      let hook = fiber.memoizedState;
+      let i = 0;
+      while (hook && !found && i < 120) {
+        const v = hook.memoizedState;
+        if (Array.isArray(v) && v.length > 500 && v[0] && typeof v[0].id === 'number' && v[0].adjacent_sectors) {
+          found = v;
+          return;
+        }
+        hook = hook.next;
+        i += 1;
+      }
+      walk(fiber.child);
+      walk(fiber.sibling);
+    };
+    walk(hostRoot);
+    if (!found) return null;
+    return found.map((s) => ({
+      id: s.id,
+      visited: !!s.visited,
+      position: Array.isArray(s.position) ? s.position.slice(0, 2) : null,
+      region: s.region || null,
+      source: s.source || null,
+      port: s.port ? (s.port.mega ? 'mega' : 'port') : null,
+      adj: Object.keys(s.adjacent_sectors || {}).map(Number).filter((n) => Number.isFinite(n))
+    }));
+  }).catch((err) => ({ __err: err.message }));
+  if (raw && raw.__err) return { ok: false, error: raw.__err };
+  if (!raw) return { ok: false, error: 'sector array not found in fiber tree' };
+  mapCache = { sectors: raw, fetchedAt: now };
+  return { ok: true, sectors: raw, cachedAt: now, fromCache: false };
+};
+
+export const clearMapCache = () => { mapCache = { sectors: null, fetchedAt: 0 }; };
+
+/**
  * Click the RECONNECT button on the in-game "DISCONNECTED" modal.
  * Returns ok:false if no such button is visible.
  */

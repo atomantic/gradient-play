@@ -107,11 +107,35 @@ Wait — the buy multiplier uses `need = 1 - stock/max`. So a **port that's near
 
 A single Wayfarer Freighter load (120 units) visibly moves port stock. Your own trades swing the price against you. **Rotate between 2–3 routes** to let port regen catch up; or commit to one route and price in diminishing returns.
 
+### Port regeneration: the exact numbers
+
+From `deployment/supabase/migrations/20260120000000_enable_port_regeneration_cron.sql`:
+
+- **Cron runs hourly** at `:00` UTC: `SELECT regenerate_ports(0.05)`.
+- **5% of max capacity per tick** on every port.
+- **Full extreme→extreme swing takes ~20 hours.**
+
+Direction — this is the critical non-obvious part:
+
+- **Sell ports refill** toward `max_stock`. Scarcity drops → price you pay drops toward `0.75 × base`.
+- **Buy ports drain** toward `0`. Need rises → price port pays rises toward `1.3 × base`.
+
+**Regeneration moves ports toward player-favorable extremes.** Player trading is the entropy — it degrades prices. The steady-state of an untouched route is *maximum profit*. A pristine, untraded port pair sits at the 0.75/1.3 wall and will stay there until someone finds it.
+
+Rotation arithmetic: with N routes cycled evenly, each route rests (N−1) × loop_time between visits. At 15 min/loop and 4 routes, each rests 45 min → ~3.75% regen per rest. Push to 6 routes and each rests 75 min → ~6.25% regen, enough to meaningfully restore the curve. **Rotate more aggressively than feels necessary.**
+
+### What does NOT affect price
+
+- **No distance modifier.** A port 50 hops from fedspace prices identically to one inside fedspace at the same stock level.
+- **No federation-space tax or bonus.** Pricing in `_shared/trading.ts` never consults sector ID, region, or fedspace membership.
+- **No ship-to-ship coordination synergy.** Buy and sell happen at different ports (codes are `S` or `B` per commodity, not both), so Ship A's buy at port X has zero effect on Ship B's sell at port Y. Two ships hitting the *same* port sequentially only hurts the later one.
+- **Frontier ports are valuable only because they're untouched.** Remote ≠ better prices by fiat — remote = less-depleted by other traders. Corp probes mapping virgin territory are literally mapping money.
+
 ---
 
 ## 4. Ship Upgrade Tree
 
-Trade-in value is ~60% of purchase price, so upgrading is cheaper than a fresh buy.
+Trade-in value is **hull price + remaining fighters × 50 credits** (from `_shared/ships.ts`: `calculateTradeInValue = (purchase_price − maxFighters×50) + currentFighters×50`). With all fighters intact, trade-in = 100% of purchase price. Every fighter lost shaves 50 cr off the refund. Upgrading is cheaper than a fresh buy because you're transferring the hull credit forward — but the "~60%" rule-of-thumb is wrong: a pristine ship trades in for its full purchase price.
 
 ```
 Sparrow Scout (loaner, free)
@@ -186,11 +210,30 @@ On kill, you get: all cargo + all on-hand credits + scrap = `max(5, floor(ship_p
 
 Garrisons are stationed fighters that remain after you leave. Three modes:
 
-| Mode | Commits on engagement | Use case |
-|---|---|---|
-| **offensive** | Up to 50% of garrison (min 50) | Deny a sector to rivals; active PvP |
-| **defensive** | Up to 25% (min 25), braces | Cheap protection of trade routes |
-| **toll** | 0 unless unpaid, then attacks | Passive income from through-traffic |
+| Mode | Auto-engages on arrival? | Commits on engagement | Use case |
+|---|---|---|---|
+| **offensive** | Yes | Up to 50% of garrison (min 50) | Deny a sector to rivals; active PvP |
+| **defensive** | **No** | Up to 25% (min 25), braces if hit | Cheap protection of trade routes |
+| **toll** | Yes | Round 1 is a demand (mutual brace); then full commit if unpaid | Passive income from through-traffic |
+
+### Attacking toll garrisons: legal, loud, and unprofitable
+
+You CAN attack a rival's toll garrison — `combat_action/index.ts:446-480` only blocks same-owner and same-corp friendly fire. But you probably shouldn't:
+
+- **Garrisons never drop salvage.** `combat_finalization.ts:271-278` just runs `DELETE FROM garrisons` on defeat. No `salvage.created` event is emitted. The accumulated `toll_balance` is **silently destroyed** — the attacker doesn't collect it and the owner doesn't get it refunded.
+- **Garrisons have 0 shields** → you hit easily (85% with shields ≥1000) but still lose 1 fighter per miss.
+- **The toll is priced by the owner to be cheaper than a fight.** Paying is almost always cheaper than destroying.
+
+So attacking is a **pure denial play**: you pay fighter attrition for zero loot, the owner loses their fighter investment plus any unwithdrawn balance. Worth it only for corp-level chokepoint control, revenge, or punching through a garrison with ≤50 fighters in one round.
+
+### Player combat options in a toll round
+
+Round 1 of a toll engagement offers four `combat_action` choices:
+
+- **`pay`** — deducts `toll_amount` from your credits, ends combat as `toll_satisfied`. Always the default unless you have a reason to fight.
+- **`attack`** — commit fighters against the garrison.
+- **`flee`** — retreat to an adjacent sector. Clamped `[20%, 90%]` success; 0-shield garrisons can't prevent flight well.
+- **`brace`** — just mitigate; buys a turn without commitment. Useful if a corpmate is inbound to help.
 
 ### Key constraints
 
@@ -237,6 +280,49 @@ Two corp-only ships:
 - **Autonomous Light Hauler (5K, 20 cargo, 10 fighters, 500 warp, 5 turns/warp):** 100-sector range. Runs a short trade loop autonomously via `start_task`. Each hauler is ~80–150K credits/hour if the route holds.
 
 **Fleet multiplier math:** 4 Light Haulers running independent 2-hop NS loops at ~500 cr/loop / 30s/loop = ~240K/hour of passive income once set up. Plus your primary ship actively trading. Plus an explorer probe. A 4-person corp with this layout **outpaces a solo Sovereign Starcruiser pilot at 10× the wealth-per-hour.**
+
+### Probe economics: run them dry, remote-sell, replace
+
+This is the counter-intuitive core of probe fleet management. It matters for fleet cost *and* exploration efficiency:
+
+- **Warp recharge**: 2 cr/unit at megaports only (`recharge_warp_power`, `PRICE_PER_UNIT = 2`). A probe with 500 warp capacity costs **1000 cr for a full recharge** — the exact same as a brand-new probe.
+- **Trade-in refund**: `ship_sell` on a corp probe with all 10 fighters intact returns **1000 cr** (hull 500 + fighters 500). Plus any credits the ship was holding.
+- **Sell+rebuy at a megaport = net 0 cr** for a fresh probe (full warp + full fighters). **Full recharge = 1000 cr** (warp only; fighters not restored).
+- **Remote-sell is legal** (see §Remote-sell below): `sell_ship` only checks the caller's personal ship, not the probe's sector. A probe stranded out of warp in neutral space sells for the same full refund.
+
+**Rule: run probes dry.** Don't return them to a megaport to refuel — every hop back is exploration you didn't do. Let a probe exhaust its warp wherever it's mapping. When the primary next docks at a megaport, remote-sell the stranded probe and buy a replacement. The probe's position when it dies is irrelevant: a dry probe at 40 hops from home is worth the same 1000 cr as one parked at the hub.
+
+**Workflow**:
+1. Probe explores outward until warp = 0 (or too low to move).
+2. Probe sits idle wherever it died.
+3. Primary arrives at a megaport on its normal trade/banking loop.
+4. Primary calls `sell_ship(ship_id=<stranded probe>)` — full refund.
+5. Primary calls `ship_purchase(...)` for a new Autonomous Probe.
+6. Dispatch fresh probe from the megaport.
+
+**Caveats**:
+- Sell+rebuy creates a new `ship_id`. Any `start_task` loop referencing the old ID dies — restart the task on the new ship.
+- If the probe lost fighters (combat), trade-in drops 50 cr per lost fighter. Still usually better than paying to refill fighters *and* warp separately.
+- `sell_ship` rejects if the caller isn't the corp member who *added* the probe (`corpShipRow.added_by !== characterId`). One designated probe-owner per corp.
+- Partial-warp recharge (≤~250 warp, ≤500 cr) is still viable if you specifically want to preserve the ship_id (e.g., long-running task you don't want to restart). Full recharges are always dominated by sell+rebuy.
+
+### Gotcha: `stats.trade_in_value` lies about autonomous ships
+
+`ship_definitions()` returns a `stats` JSONB that includes `trade_in_value: 0` for both `autonomous_probe` and `autonomous_light_hauler` (hardcoded in the seed migration `20251109093000_add_ship_purchase_price.sql:34-37`). **This field is not what `ship_sell` uses.** The endpoint calls `calculateTradeInValue(ship, definition)` from `_shared/ships.ts`, which ignores the stats field and computes: `(purchase_price − maxFighters×50) + currentFighters×50`.
+
+For an intact probe: `(1000 − 500) + 500 = 1000 cr`. For an intact light hauler: `(5000 − 500) + 500 = 5000 cr`.
+
+If your AI agent reports "this probe has zero trade-in value," it's reading the stale `stats` field. Tell it to call `sell_ship` anyway — the refund will be ~full purchase price (minus 50 cr per missing fighter, plus whatever credits the ship held).
+
+### Remote-sell is legal and underused
+
+`ship_sell/index.ts` only checks **your personal ship's** location (`ensureShipAtMegaPort(universeMeta, personalShip)` — the *target* ship's position is never checked). Consequence: a probe stranded deep in neutral space, out of warp, in a hostile sector can still be sold for its full trade-in value — you just need to be parked at a megaport yourself with the probe's `ship_id`. No rescue flight, no warp transfer, no abandonment loss. Treat probes as fully recoverable the moment *you* dock at a megaport.
+
+### You cannot salvage your own probes
+
+`combat_initiate` (see `combat_initiate/index.ts:254-259`) filters out same-corporation participants. Probes are corp-owned, you're in the corp → no combat resolves against your own probe. Even if it could: scrap on kill is `max(5, floor(purchase_price/1000))` = **5 credits** for a probe. Selling returns 200× that. Self-destruction-for-salvage is not a strategy; `ship_sell` is.
+
+Enemy destruction of your probe yields the attacker only ~5 cr scrap (probes have no cargo) — so probes are economically uninteresting targets, which is why they're useful as expendable scouts in contested neutral space.
 
 ### Corp map knowledge
 
@@ -366,9 +452,10 @@ Tools you'll forget exist but shouldn't:
 
 1. **NS (Neuro-Symbolics) is the premium commodity.** 2.2× the margin of RO per cargo slot. Default to NS until capacity makes it irrelevant.
 2. **Credits per warp-turn, not per trip.** A short fat loop beats a long thin one — almost always.
-3. **Shields past 1000 only help ablation, not hit-math.** The 50% mitigation cap is hard.
-4. **Bank insurance > fighter stockpile.** Destroyed ships drop credits; bank balances never do.
-5. **Corp founding is ROI-positive only with ≥2 active teammates and ≥50K capital.** Otherwise it's a 10K ego tax.
+3. **Untouched ports print money; your trades decay that edge.** Regen is player-favorable (5%/hr toward 0.75/1.3 extremes). Find virgin routes, rotate aggressively, never grind one route to zero.
+4. **Shields past 1000 only help ablation, not hit-math.** The 50% mitigation cap is hard.
+5. **Bank insurance > fighter stockpile.** Destroyed ships drop credits; bank balances never do.
+6. **Corp founding is ROI-positive only with ≥2 active teammates and ≥50K capital.** Otherwise it's a 10K ego tax.
 
 ---
 
@@ -376,9 +463,9 @@ Tools you'll forget exist but shouldn't:
 
 Things worth testing in practice (the code reveals mechanisms but not equilibrium behavior):
 
-- **Port regeneration rate.** Cron runs periodically; frequency not immediately obvious without watching a port. Test: deplete a port, time the rebound.
 - **Rival garrison interaction.** Two garrisons in the same sector from different players — who engages whom, and when? Mode matrix isn't fully documented.
 - **Leaderboard refresh cadence.** Cached; `force_refresh=true` exists but there's a cost. How stale is stale?
 - **PvP frequency.** The game is agent-driven — how aggressive are other AI agents? Playstyle hinges on whether neutral space is a shooting gallery or mostly empty.
+- **Trade density on popular routes.** Regen is 5%/hr globally, but a route getting hit every 10 minutes by 3 different players stays pinned at minimum-favorable. Finding out which sectors are low-traffic is effectively a market-intel problem — solvable with `event_query` on `trade.executed` events.
 
 Start with merchant archetype until you've measured these. Pivot once you know the real PvP rate.

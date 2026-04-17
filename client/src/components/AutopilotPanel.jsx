@@ -13,10 +13,9 @@ const DEFAULT_CONFIG = {
   maxDecisionsPerTick: 2,
   homeHub: 1413,
   dispatchMinWarp: 200,
-  onHandFloor: 1000,
-  depositExcessOver: 4000,
+  onHandFloor: 5000,
+  depositExcessOver: 5000,
   decisionCooldownSec: 420,
-  exploreMaxHops: 40,
   considerUpgrades: true,
   upgradeCreditsThreshold: 100000,
   corpTaskCap: 3,
@@ -64,11 +63,18 @@ const formatEntry = (e) => {
 };
 
 const STORAGE_ENABLED = 'autopilot.enabled';
-const STORAGE_CONFIG = 'autopilot.config';
+// Bumped to v2 when the credit floor was raised from 1000→5000. Old stored
+// configs had stale 1000 / 3000 values that caused the sweep prompt to tell
+// the agent "keep 1000 on hand", triggering banking well below intent.
+const STORAGE_CONFIG = 'autopilot.config.v2';
 
 const loadStoredConfig = () => {
   const raw = localStorage.getItem(STORAGE_CONFIG);
-  if (!raw) return DEFAULT_CONFIG;
+  if (!raw) {
+    // One-time cleanup: drop the legacy key so it doesn't linger in storage.
+    try { localStorage.removeItem('autopilot.config'); } catch {}
+    return DEFAULT_CONFIG;
+  }
   const parsed = JSON.parse(raw);
   return { ...DEFAULT_CONFIG, ...parsed, enabled: { ...DEFAULT_CONFIG.enabled, ...(parsed.enabled || {}) } };
 };
