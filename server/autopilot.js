@@ -22,11 +22,19 @@ const homeHub = () => state.config?.homeHub ?? DEFAULTS.homeHub;
  * Compact standing-orders suffix. All policy in one short bracket so the game
  * chat input doesn't truncate the core task instruction.
  */
-const standingOrders = (shipName = '', { isProbe = false, creditKeep = 1000 } = {}) => {
+const standingOrders = (shipName = '', { isProbe = false, creditKeep = 1000, tradeFallback = false } = {}) => {
   const cfg = state.config || {};
   const bad = dangerousSectors();
   const parts = [];
-  if (cfg.safeMode && !isProbe) parts.push('fedspace');
+  if (cfg.safeMode && !isProbe) {
+    // For trade dispatches, allow a small excursion outside fedspace when no
+    // fedspace port will buy the cargo — otherwise the hauler cycles through
+    // full/sated fedspace buyers forever. Hard fedspace stays the default for
+    // everything else (rescues, upgrades, bank sweeps).
+    parts.push(tradeFallback
+      ? `fedspace first; +1-2 border hops OK only if no fedspace buyer accepts the cargo; keep warp to return to a megaport (${megaportList()})`
+      : 'fedspace');
+  }
   if (bad.length) parts.push(`avoid ${bad.slice(0, 6).join(',')}`);
   parts.push('avoid tolls');
   if (isProbe) parts.push('bank all credits');
