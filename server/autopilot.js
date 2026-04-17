@@ -1596,6 +1596,7 @@ export const queueFundSequence = async () => {
   const skipped = [];
   for (const s of ships) {
     if (s.primary) continue;
+    if (shipKind(s.name) === 'probe') continue; // probes run dry by design
     const needs = (s.credits != null && s.credits < 1000) || s.credits == null;
     if (!needs) continue;
     const reason = coLocationReason(s, primary.sector);
@@ -1659,6 +1660,7 @@ export const queueBalanceSequence = async () => {
   const skipped = [];
   for (const s of ships) {
     if (s.primary) continue;
+    if (shipKind(s.name) === 'probe') continue; // probes run dry by design
     if (s.credits == null) { unknowns.push(s.name); continue; }
     const reason = coLocationReason(s, primary.sector);
     if (reason) { skipped.push({ name: s.name, reason }); continue; }

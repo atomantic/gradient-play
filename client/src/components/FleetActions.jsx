@@ -2,12 +2,12 @@ import React, { useRef, useState } from 'react';
 import { Fuel, MapPin, Banknote, Zap, Scale, Briefcase, Rocket, Home } from 'lucide-react';
 
 const STEPS = [
-  { name: 'fuel-share',         label: 'Fuel Share',      icon: Fuel,      hint: 'transfer_warp between ships until everyone has enough to move' },
-  { name: 'rally',              label: 'Rally to Hub',    icon: MapPin,    hint: 'plot_course every ship to the home hub and dock' },
-  { name: 'fund-for-recharge',  label: 'Fund Ships',      icon: Banknote,  hint: 'primary transfers credits to any ship below 1000' },
-  { name: 'recharge',           label: 'Recharge',        icon: Zap,       hint: 'recharge_warp_power on every ship to full' },
-  { name: 'credit-balance',     label: 'Balance Credits', icon: Scale,     hint: 'even out credits at the configured floor, primary banks excess' },
-  { name: 'resume',             label: 'Dispatch Roles',  icon: Briefcase, hint: 'send every ship back to its role-appropriate task' }
+  { name: 'fuel-share',         label: 'Fuel Share',      icon: Fuel,      hint: 'transfer_warp between non-probe ships until everyone has enough to move' },
+  { name: 'rally',              label: 'Rally to Hub',    icon: MapPin,    hint: 'plot_course non-probe ships to the home hub and dock (probes stay in the field)' },
+  { name: 'fund-for-recharge',  label: 'Fund Ships',      icon: Banknote,  hint: 'primary transfers credits to any non-probe ship below 1000' },
+  { name: 'recharge',           label: 'Recharge',        icon: Zap,       hint: 'recharge_warp_power on every non-probe ship to full' },
+  { name: 'credit-balance',     label: 'Balance Credits', icon: Scale,     hint: 'even out credits on non-probe ships at the configured floor, primary banks excess' },
+  { name: 'resume',             label: 'Dispatch Roles',  icon: Briefcase, hint: 'send non-probe ships back to their role tasks; probes keep exploring' }
 ];
 
 export const FleetActions = () => {

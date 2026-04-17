@@ -59,7 +59,10 @@ const warpMaxOf = (ship) => {
   return 500;
 };
 
-const isProbe = (ship) => /PROBE/i.test(ship.name || '');
+// Mirrors autopilot.js shipKind() — any corp ship named as a probe-class
+// scout. Refueler/tanker ships are intentionally NOT in this set; they still
+// participate in fleet rally (their job is to come home and refuel others).
+const isProbe = (ship) => /PROBE|EXPLORER|SCAVENGER|SALVAGER|SCOUT|PATHFINDER/i.test(ship.name || '');
 
 /**
  * Refuel plan for a ship that fell below warp floor.
@@ -171,11 +174,18 @@ const EXEC_NOW = ' execute immediately, no confirmation needed.';
  *   3. recharge    → recharge_warp_power on every ship
  *   4. credit-sweep → transfer excess credits to primary, primary bank_deposits
  *   5. resume      → put every ship back on its role-appropriate task
+ *
+ * Probes (explorer/scavenger/salvager/scout/pathfinder) are intentionally
+ * EXCLUDED from every operational step. They're designed to run dry in the
+ * field — recalling them wastes exploration progress and they're reclaimed
+ * later via the sell+rebuy workflow when the primary docks. Refuelers stay
+ * in the rally (they come home to refuel the fleet, that's their role).
  */
 export const buildFleetRallyPlan = (ships = [], { keepCredits = 1000, megaports = [305, 472, 1413], homeHub = 305, resume = true } = {}) => {
-  const names = ships.map((s) => s.name).filter(Boolean);
-  const fleetLabel = names.length ? names.join(', ') : 'every ship';
-  const primary = ships.find((s) => s.primary);
+  const opShips = ships.filter((s) => !isProbe(s));
+  const names = opShips.map((s) => s.name).filter(Boolean);
+  const fleetLabel = names.length ? names.join(', ') : 'every non-probe ship';
+  const primary = opShips.find((s) => s.primary) || ships.find((s) => s.primary);
   const primaryName = primary?.name || 'the primary ship';
 
   const steps = [];
@@ -183,25 +193,24 @@ export const buildFleetRallyPlan = (ships = [], { keepCredits = 1000, megaports 
   // Step 1: fuel-share
   steps.push({
     name: 'fuel-share',
-    prompt: `transfer_warp_power from fleetmates to any ship with warp < ${MIN_WARP_TO_MOVE}, enough to reach ≥ ${MIN_WARP_TO_MOVE * 3}. fleet: ${fleetLabel}. no new tasks.${EXEC_NOW}`,
+    prompt: `transfer_warp_power from fleetmates to any ship with warp < ${MIN_WARP_TO_MOVE}, enough to reach ≥ ${MIN_WARP_TO_MOVE * 3}. fleet: ${fleetLabel}. leave probes alone (they run dry by design). no new tasks.${EXEC_NOW}`,
     nagMs: 120_000,
     maxMs: 6 * 60_000,
     isDone: (snap) => {
-      const all = snap?.extracted?.ships || [];
+      const all = (snap?.extracted?.ships || []).filter((s) => !isProbe(s));
       return all.every((s) => s.warpPower == null || s.warpPower >= MIN_WARP_TO_MOVE);
     }
   });
 
-  // Step 2: rally — everyone MUST meet at the home hub specifically, not
-  // just any shared sector. This guarantees transfer_credits/bank_deposit
-  // coordination later.
+  // Step 2: rally — every non-probe ship meets at the home hub. Probes stay
+  // in the field; they're reclaimed via remote sell+rebuy, not by recall.
   steps.push({
     name: 'rally',
-    prompt: `plot_course every ship to sector ${homeHub} and dock. fleet: ${fleetLabel}. no start_task.${EXEC_NOW}`,
+    prompt: `plot_course every ship to sector ${homeHub} and dock. fleet: ${fleetLabel}. do NOT recall probes — leave any probe/explorer/scavenger/salvager alone in the field. no start_task.${EXEC_NOW}`,
     nagMs: 150_000,
     maxMs: 8 * 60_000,
     isDone: (snap) => {
-      const all = snap?.extracted?.ships || [];
+      const all = (snap?.extracted?.ships || []).filter((s) => !isProbe(s));
       if (all.length < 2) return false;
       return all.every((s) => s.sector === homeHub && s.active === false);
     }
@@ -214,7 +223,7 @@ export const buildFleetRallyPlan = (ships = [], { keepCredits = 1000, megaports 
   // Game mechanic: each transfer_credits is a separate action by the primary,
   // so the agent must queue them one at a time; but one bank_withdraw covers
   // the whole batch.
-  const corpShips = ships.filter((s) => !s.primary);
+  const corpShips = opShips.filter((s) => !s.primary);
   const fundTransfers = corpShips
     .filter((s) => s.credits != null && s.credits < 1000)
     .map((s) => ({ name: s.name, amount: 1000 - s.credits }));
@@ -232,7 +241,7 @@ export const buildFleetRallyPlan = (ships = [], { keepCredits = 1000, megaports 
     nagMs: 90_000,
     maxMs: 4 * 60_000,
     isDone: (snap) => {
-      const all = snap?.extracted?.ships || [];
+      const all = (snap?.extracted?.ships || []).filter((s) => !isProbe(s));
       return all.filter((s) => !s.primary).every((s) => s.credits == null || s.credits >= 800);
     }
   });
@@ -240,12 +249,12 @@ export const buildFleetRallyPlan = (ships = [], { keepCredits = 1000, megaports 
   // Step 4: recharge — only name ships that actually need it. Ships already
   // at ≥90% of class max are skipped so the agent doesn't waste an action
   // (and credits) topping off a full tank.
-  const rechargeNeeded = ships.filter((s) => {
+  const rechargeNeeded = opShips.filter((s) => {
     if (s.warpPower == null) return true; // unknown — include to be safe
     const max = s.warpMax ?? warpMaxOf(s);
     return s.warpPower < max * 0.9;
   });
-  const rechargeFull = ships
+  const rechargeFull = opShips
     .filter((s) => s.warpPower != null && s.warpPower >= (s.warpMax ?? warpMaxOf(s)) * 0.9)
     .map((s) => s.name);
   const rechargeNames = rechargeNeeded.map((s) => s.name).filter(Boolean);
@@ -258,7 +267,7 @@ export const buildFleetRallyPlan = (ships = [], { keepCredits = 1000, megaports 
     nagMs: 90_000,
     maxMs: 5 * 60_000,
     isDone: (snap) => {
-      const all = snap?.extracted?.ships || [];
+      const all = (snap?.extracted?.ships || []).filter((s) => !isProbe(s));
       return all.every((s) => {
         if (s.warpPower == null) return true;
         const max = s.warpMax ?? warpMaxOf(s);
@@ -294,7 +303,7 @@ export const buildFleetRallyPlan = (ships = [], { keepCredits = 1000, megaports 
     nagMs: 90_000,
     maxMs: 4 * 60_000,
     isDone: (snap) => {
-      const all = snap?.extracted?.ships || [];
+      const all = (snap?.extracted?.ships || []).filter((s) => !isProbe(s));
       const corpShips = all.filter((s) => !s.primary && s.credits != null);
       return corpShips.every((s) => {
         // Allow a small tolerance band around keepCredits — recharge costs
@@ -304,14 +313,16 @@ export const buildFleetRallyPlan = (ships = [], { keepCredits = 1000, megaports 
     }
   });
 
-  // Step 6: resume (optional — skip for "Home Base" which parks the fleet)
+  // Step 6: resume (optional — skip for "Home Base" which parks the fleet).
+  // Probes in the field keep doing whatever they were doing; we only dispatch
+  // the ships that came home to rally.
   if (resume) steps.push({
     name: 'resume',
-    prompt: `dispatch each ship. haulers/primary: trade in fedspace, routes are their call. probes/explorer: explore-salvage. scavenger: salvage. refueler: park.${EXEC_NOW}`,
+    prompt: `dispatch non-probe ships: haulers/primary trade in fedspace, routes are their call. refueler: park. leave any probe/explorer/scavenger alone — they stay on their current task in the field.${EXEC_NOW}`,
     nagMs: 120_000,
     maxMs: 5 * 60_000,
     isDone: (snap) => {
-      const all = snap?.extracted?.ships || [];
+      const all = (snap?.extracted?.ships || []).filter((s) => !isProbe(s));
       return all.filter((s) => !s.primary).every((s) => s.active === true);
     }
   });
