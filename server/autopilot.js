@@ -248,7 +248,7 @@ const DEFAULTS = {
   // per-account via data/config.json if you're flying a bigger hull.
   shipFundingFloor: 3000,         // minimum credits a ship should have before dispatch — seed from primary if below
   onHandFloor: 5000,              // working float to keep on-hand on every ship (covers a single ~1500 cr trade plus buffer)
-  depositExcessOver: 5000,        // trigger sweep when on-hand is floor+this (so 10k → deposit 5k, leave 5k)
+  depositExcessOver: 20000,       // trigger sweep when on-hand is floor+this (so 25k → deposit 20k, leave 5k)
   decisionCooldownSec: 420,       // 7 min — longer than a typical refuel or task handoff
   considerUpgrades: true,
   upgradeCreditsThreshold: 100000,
@@ -972,11 +972,14 @@ const decide = async (snapshot) => {
     }
   }
 
-  // Bank excess credits aggressively for EVERY ship, not just the player's on-hand.
-  // Destruction drops whatever the ship is carrying; bank balance is untouchable.
-  // Policy: when a ship reaches (onHandFloor + depositExcessOver) credits,
-  // sweep down to onHandFloor at the next megaport.
-  if (cfg.enabled.bank) {
+  // Bank excess credits only when ships are leaving federation space.
+  // Destruction drops whatever a ship is carrying, so banking is protection
+  // against PvP/NPC loss — a risk that exists only outside fedspace. When
+  // the entire fleet is in safe mode and nobody's in troublemaker, credits
+  // on hand are as safe as credits in the bank, so a rendezvous-at-hub
+  // sweep is pure overhead.
+  const leavingFedspace = !cfg.safeMode || cfg.troubleMaker;
+  if (cfg.enabled.bank && leavingFedspace) {
     // Player on-hand (comes from the top-bar, not the per-ship credits field).
     const onHand = ex.creditsOnHand ?? 0;
     const excess = onHand - cfg.onHandFloor;

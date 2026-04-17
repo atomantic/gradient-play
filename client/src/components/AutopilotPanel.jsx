@@ -14,13 +14,14 @@ const DEFAULT_CONFIG = {
   homeHub: 1413,
   dispatchMinWarp: 200,
   onHandFloor: 5000,
-  depositExcessOver: 5000,
+  depositExcessOver: 20000,
   decisionCooldownSec: 420,
   considerUpgrades: true,
   upgradeCreditsThreshold: 100000,
   corpTaskCap: 3,
   primaryDispatchCooldownSec: 300,
-  enabled: { refuel: true, explore: true, trade: true, bank: true, upgrade: true, primary: true }
+  enabled: { refuel: true, explore: true, trade: true, bank: true, upgrade: true, primary: true },
+  strategyAdvisor: { enabled: false, intervalSec: 900, providerId: null, model: null }
 };
 
 const entryColor = (type) => ({
@@ -76,7 +77,12 @@ const loadStoredConfig = () => {
     return DEFAULT_CONFIG;
   }
   const parsed = JSON.parse(raw);
-  return { ...DEFAULT_CONFIG, ...parsed, enabled: { ...DEFAULT_CONFIG.enabled, ...(parsed.enabled || {}) } };
+  return {
+    ...DEFAULT_CONFIG,
+    ...parsed,
+    enabled: { ...DEFAULT_CONFIG.enabled, ...(parsed.enabled || {}) },
+    strategyAdvisor: { ...DEFAULT_CONFIG.strategyAdvisor, ...(parsed.strategyAdvisor || {}) }
+  };
 };
 
 export const AutopilotPanel = () => {
@@ -88,20 +94,26 @@ export const AutopilotPanel = () => {
   const autoStartTriedRef = useRef(false);
   const lastAutoStartAtRef = useRef(0);
 
+  // Server state polls every 10s. We deliberately do NOT overwrite `config`
+  // here — the UI is the source of truth for configuration, and any echo
+  // from the server (which reports the MERGED effective config after user
+  // overrides from data/config.json) would clobber in-progress edits the
+  // user is typing in the Settings panel.
   const refresh = async () => {
     const s = await fetch('/api/autopilot').then((r) => r.json());
     setState(s);
-    if (s.config) setConfig({ ...DEFAULT_CONFIG, ...s.config, enabled: { ...DEFAULT_CONFIG.enabled, ...(s.config.enabled || {}) } });
     if (s.log) setEntries(s.log);
     return s;
   };
 
   // If localStorage says autopilot should be running but server says it isn't,
   // restart it. Throttled so we don't hammer the server when something keeps
-  // failing.
+  // failing. If the server reports a stopReason (e.g. non-CEO stranded halt),
+  // DO NOT auto-restart — the operator must intervene and hit Start manually.
   const maybeAutoStart = async (serverState) => {
     if (localStorage.getItem(STORAGE_ENABLED) !== 'true') return;
     if (serverState?.running) return;
+    if (serverState?.stopReason) return;
     if (Date.now() - lastAutoStartAtRef.current < 20_000) return;
     lastAutoStartAtRef.current = Date.now();
     const cfg = loadStoredConfig();
@@ -140,10 +152,22 @@ export const AutopilotPanel = () => {
     if (scrollRef.current) scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
   }, [entries]);
 
+  // Autosave config on every change. Previously the config was only written
+  // to localStorage in start() — so editing a value without clicking Start
+  // left the change in React state, and the next 10s poll from refresh()
+  // overwrote it with the server's echo.
+  useEffect(() => {
+    try { localStorage.setItem(STORAGE_CONFIG, JSON.stringify(config)); } catch {}
+  }, [config]);
+
   const start = async () => {
     localStorage.setItem(STORAGE_ENABLED, 'true');
     localStorage.setItem(STORAGE_CONFIG, JSON.stringify(config));
     lastAutoStartAtRef.current = Date.now();
+    // Clear any server-side stopReason by manually invoking stop (no-op if
+    // already stopped) before start — otherwise a stale reason would persist
+    // in the next state payload.
+    await fetch('/api/autopilot/stop', { method: 'POST' }).catch(() => {});
     await fetch('/api/autopilot/start', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -190,6 +214,13 @@ export const AutopilotPanel = () => {
           )}
         </div>
       </div>
+
+      {state?.stopReason ? (
+        <div className="mb-2 p-2 rounded border border-amber-700 bg-amber-950/30 text-[11px] text-amber-200">
+          <div className="font-semibold text-amber-300 mb-0.5">Autopilot halted — operator action required</div>
+          {state.stopReason}
+        </div>
+      ) : null}
 
       {showConfig ? (
         <div className="text-[11px] space-y-2 mb-2 p-2 rounded border border-slate-800 bg-slate-950">
@@ -288,6 +319,34 @@ export const AutopilotPanel = () => {
           <div className="text-[10px] text-fuchsia-400/70 -mt-0.5">
             Troublemaker: primary leaves fedspace, hunts salvage, engages combat, trades only for fuel. Banks down to 1,000 on-hand before each run; refuels at home hub between runs.
           </div>
+
+          <div className="pt-1 mt-1 border-t border-slate-800">
+            <div className="text-[10px] uppercase tracking-wider text-sky-300 mb-1">Strategic LLM advisor</div>
+            <div className="flex flex-wrap gap-x-3 gap-y-1 items-center">
+              <label className="flex items-center gap-1 text-sky-300">
+                <input type="checkbox" checked={!!config.strategyAdvisor?.enabled}
+                  onChange={(e) => setConfig({
+                    ...config,
+                    strategyAdvisor: { ...config.strategyAdvisor, enabled: e.target.checked }
+                  })} />
+                consult LLM on interval
+              </label>
+              <label className="flex items-center gap-1 text-slate-400">
+                every
+                <input type="number" min={300} step={60}
+                  value={config.strategyAdvisor?.intervalSec ?? 900}
+                  onChange={(e) => setConfig({
+                    ...config,
+                    strategyAdvisor: { ...config.strategyAdvisor, intervalSec: Number(e.target.value) }
+                  })}
+                  className="bg-slate-950 border border-slate-800 rounded px-1 py-0.5 w-16" /> s
+              </label>
+            </div>
+            <div className="text-[10px] text-sky-400/70 -mt-0.5">
+              LLM reads strategy.md + current fleet state and recommends next moves in the AI tab. Output is advisory — not auto-executed. Configure a provider in the AI tab first.
+            </div>
+          </div>
+
           <div className="text-slate-500 text-[10px]">
             Changes take effect on next Start. Stop + Start to apply.
           </div>
