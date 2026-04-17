@@ -1,6 +1,5 @@
 import { randomUUID } from 'node:crypto';
 import { getGameSnapshot, sendAssistantPrompt } from './cdp.js';
-import { dangerousSectors } from './intel.js';
 
 const missions = new Map();
 const logSubscribers = new Map();
@@ -24,20 +23,11 @@ const pick = (arr) => arr[Math.floor(Math.random() * arr.length)];
 const shipPhrase = (spec) =>
   spec.targetShip ? `the ${spec.targetShip}` : 'the fleet';
 
-const safeRoutingClause = () => {
-  const bad = dangerousSectors();
-  if (!bad.length) return pick([
-    'pick a safe megaport, closest if warp is tight.',
-    'head for a safe megaport, closest works if warp is low.',
-    'safe megaport preferred, closest otherwise.'
-  ]);
-  const list = bad.slice(0, 8).join(', ');
-  return pick([
-    `route around ${list} if you can, closest megaport is fine if warp is tight.`,
-    `avoid sectors ${list} if possible.`,
-    `steer clear of ${list} if warp allows.`
-  ]);
-};
+const safeRoutingClause = () => pick([
+  'pick a safe megaport, closest if warp is tight.',
+  'head for a safe megaport, closest works if warp is low.',
+  'safe megaport preferred, closest otherwise.'
+]);
 
 const buildKickoffPrompt = (spec) => {
   const who = shipPhrase(spec);

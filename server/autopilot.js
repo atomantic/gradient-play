@@ -1,5 +1,5 @@
 import { getGameSnapshot, sendAssistantPrompt, clickGameReconnect, loginIfNeeded, getMapSectors } from './cdp.js';
-import { observe as intelObserve, dangerousSectors } from './intel.js';
+import { observe as intelObserve } from './intel.js';
 import { buildRefuelPlan, buildFleetRallyPlan, FLEET_PLAN_KEY, currentStepOf, isComplete, advance } from './plans.js';
 
 const pick = (arr) => arr[Math.floor(Math.random() * arr.length)];
@@ -24,7 +24,6 @@ const homeHub = () => state.config?.homeHub ?? DEFAULTS.homeHub;
  */
 const standingOrders = (shipName = '', { isProbe = false, creditKeep = 1000, tradeFallback = false } = {}) => {
   const cfg = state.config || {};
-  const bad = dangerousSectors();
   const parts = [];
   if (cfg.safeMode && !isProbe) {
     // For trade dispatches, allow a small excursion outside fedspace when no
@@ -35,7 +34,6 @@ const standingOrders = (shipName = '', { isProbe = false, creditKeep = 1000, tra
       ? `fedspace first; +1-2 border hops OK only if no fedspace buyer accepts the cargo; keep warp to return to a megaport (${megaportList()})`
       : 'fedspace');
   }
-  if (bad.length) parts.push(`avoid ${bad.slice(0, 6).join(',')}`);
   parts.push('avoid tolls');
   if (isProbe) parts.push('bank all credits');
   else if (creditKeep > 0) parts.push(`bank >${creditKeep}`);
@@ -196,12 +194,7 @@ const primaryTradePrompt = (primary) => {
  * megaport hub when warp gets low. Safe-mode is explicitly bypassed.
  */
 const primaryTroubleMakerPrompt = (primary) => {
-  const bad = dangerousSectors();
-  const parts = [];
-  if (bad.length) parts.push(`avoid ${bad.slice(0, 6).join(',')}`);
-  parts.push('avoid tolls');
-  parts.push('execute now');
-  const orders = ` [${parts.join('; ')}]`;
+  const orders = ' [avoid tolls; execute now]';
   return pick([
     `${primary}: troublemaker run. bank_deposit down to 1000 on-hand first, then push beyond fedspace. hunt salvage, engage combat when profitable, trade only for fuel money. return to hub ${homeHub()} to recharge_warp_power when warp runs low.`,
     `${primary}: frontier salvage hunt. first deposit excess to bank (keep 1000), then exit fedspace, claim salvage, combat OK, trade as needed to stay fueled. hub ${homeHub()} for refuel cycles.`,

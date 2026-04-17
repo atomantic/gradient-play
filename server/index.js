@@ -79,24 +79,17 @@ app.post('/api/fleet/rename-ship', async (req, res) => {
 
 app.post('/api/fleet/recall-refuel', async (_req, res) => {
   const { getGameSnapshot } = await import('./cdp.js');
-  const { dangerousSectors } = await import('./intel.js');
   const snap = await getGameSnapshot();
   const ships = (snap?.extracted?.ships || []).map((s) => s.name).filter(Boolean);
-  const bad = dangerousSectors();
   const pick = (arr) => arr[Math.floor(Math.random() * arr.length)];
-  const routing = bad.length
-    ? pick([
-        `route around ${bad.slice(0, 8).join(', ')} if you can, closest megaport works if warp is tight.`,
-        `avoid ${bad.slice(0, 8).join(', ')} if possible.`
-      ])
-    : `closest safe megaport for each ship.`;
+  const routing = 'closest safe megaport for each ship.';
   const fleetLabel = ships.length ? ships.join(', ') : 'the whole corp fleet';
   const text = pick([
     `fleet recall. pause tasks on ${fleetLabel}, send every ship to a safe megaport, top off warp, standby. ${routing}`,
     `regroup. pause everything on ${fleetLabel}, each ship to a safe megaport, refuel, standby. ${routing}`,
     `all ships recall. stop tasks on ${fleetLabel}, safe megaports, refuel, standby. ${routing}`
   ]);
-  log('🚨', 'Fleet recall & refuel', { shipCount: ships.length, dangerous: bad.length });
+  log('🚨', 'Fleet recall & refuel', { shipCount: ships.length });
   const result = await sendAssistantPrompt(text);
   res.json({ ok: !!result.ok, text, shipCount: ships.length, send: result });
 });

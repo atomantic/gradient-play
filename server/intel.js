@@ -263,5 +263,3 @@ export const getIntel = () => {
     updatedAt: store.updatedAt
   };
 };
-
-export const dangerousSectors = () => Array.from(new Set(store.events.map((e) => e.sector).filter((s) => s != null)));
