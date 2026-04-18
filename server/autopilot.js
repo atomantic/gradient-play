@@ -961,15 +961,19 @@ const decide = async (snapshot) => {
   // silently fails at the game layer and burns its cooldown.
   const fundingFloor = cfg.shipFundingFloor ?? cfg.creditsForRefuel ?? 1000;
   const primaryCanFund = primaryAvailable && primaryShip.sector === homeHub();
-  // Credit-gate only — a ship is underfunded whenever it's below the floor,
-  // regardless of where it currently sits. Actually funding it still requires
-  // both ships co-located at the hub, but we must never dispatch trade on an
-  // underfunded hauler (agent just responds "still waiting for startup
-  // credits"). Split into two checks:
+  // Credit-gate only — a ship is underfunded whenever we can't prove it has
+  // at least the floor. Null credits (DOM scrape failed) are treated as
+  // underfunded because we can't verify; the alternative is dispatching
+  // trade to a 0-credit ship and watching the agent refuse.
   const isUnderfunded = (s) =>
-    s.credits != null && s.credits < fundingFloor && !hasPlan(s.name);
+    !hasPlan(s.name) && (s.credits == null || s.credits < fundingFloor);
+  // Actually funding requires both ships co-located at the hub AND a known
+  // credits delta (we can't transfer an unknown amount).
   const fundableAtHub = (s) =>
-    isUnderfunded(s) && s.sector === homeHub() && primaryCanFund;
+    isUnderfunded(s)
+    && s.credits != null
+    && s.sector === homeHub()
+    && primaryCanFund;
   // Back-compat alias; probe dispatch still uses `needsFunding` with the old
   // semantics (at-hub-and-fundable).
   const needsFunding = fundableAtHub;
