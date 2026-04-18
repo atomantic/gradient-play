@@ -209,6 +209,8 @@ const DEFAULTS = {
   haulerPreferredRoute: null,
   megaports: [305, 472, 1413],      // known mega-port sectors — add more as probes discover them
   homeHub: 1413,                    // preferred dock for fuel/banking — the fleet's home base
+  shortenProbeNames: true,          // auto-rename probes whose name exceeds probeNameMaxChars
+  probeNameMaxChars: 22,            // fresh purchases sometimes arrive with long date-stamped names; trim them
   safeMode: true,                  // restrict non-probe ships to federation space
   // CEO mode: autopilot dispatches corp ships. Default off so cloned checkouts
   // don't stomp on a corp's task slots. Override per-user via data/config.json.
@@ -396,6 +398,32 @@ const probeRole = (name = '') => {
 };
 
 /**
+ * Compute a short, role-preserving target name for a probe. Fresh purchases
+ * sometimes arrive auto-named with date strings ("SAME AUTO PROBE 2026-04-18"),
+ * which are hard to distinguish visually. Multiple probes in the same role
+ * get a numeric suffix so names stay unique.
+ */
+const shortProbeName = (probe, allShips = []) => {
+  const role = probeRole(probe.name);
+  const base = role === 'refueler' ? 'Probe Refueler'
+    : role === 'explorer' ? 'Probe Explorer'
+    : role === 'scavenger' ? 'Probe Scavenger'
+    : 'Probe';
+  const collides = allShips.some((x) => x.name !== probe.name && x.name === base);
+  if (!collides) return base;
+  const rx = new RegExp(`^${base}\\s+(\\d+)$`, 'i');
+  const used = new Set();
+  for (const x of allShips) {
+    if (x.name === probe.name) continue;
+    const m = x.name.match(rx);
+    if (m) used.add(Number(m[1]));
+  }
+  let n = 2; // 1 is implied by the unsuffixed base name
+  while (used.has(n)) n += 1;
+  return `${base} ${n}`;
+};
+
+/**
  * Remote-sell a stranded probe and replace it with a fresh one. strategy.md
  * §7: sell_ship only checks the caller's personal-ship location (megaport in
  * fedspace), not the probe's sector. Stranded probes at 0 warp deep in neutral
@@ -421,8 +449,8 @@ const probeReplacePrompt = (probeName, probeSector, probeWarp, primaryAtMegaport
   // idle — refuelers wait for rescue dispatches, they do not run autonomous
   // tasks of their own.
   const finalStep = role === 'refueler'
-    ? `4) rename_ship the new probe to "Probe Refueler" (or any name containing "Refueler") so autopilot keeps tracking it as the fuel tanker. 5) DO NOT start_task — the refueler stands by until a fleetmate needs warp.`
-    : `4) start_task to dispatch the fresh probe on exploration.`;
+    ? `4) rename_ship the new probe to "Probe Refueler" (short, no date suffix) so autopilot keeps tracking it as the fuel tanker. 5) DO NOT start_task — the refueler stands by until a fleetmate needs warp.`
+    : `4) rename_ship the new probe to "Probe Explorer" (short, no date suffix, max ~22 chars) so it's easy to distinguish from other probes. 5) start_task to dispatch the fresh probe on exploration.`;
   return `${probeName} is stranded ${loc} at ${probeWarp ?? 0} warp — recycle it via REMOTE SELL. DO NOT move ${probeName}; it has no warp and cannot travel. sell_ship only checks the primary's sector, so the primary calls it remotely on ${probeName}.${creditsNote} ${travel} sequence (primary performs all steps): 1) corporation_info to fetch ${probeName}'s ship_id. 2) sell_ship(ship_id=<${probeName}'s hex prefix>) — refund covers hull (~1000 cr) + any credits ${probeName} was holding. 3) ship_purchase a new Autonomous Probe. ${finalStep} one action at a time, execute immediately, no confirmation.`;
 };
 
@@ -733,6 +761,30 @@ const decide = async (snapshot) => {
           )
         });
       }
+    }
+  }
+
+  // Auto-shorten long probe names. Fresh purchases sometimes arrive with
+  // date-stamped auto-names like "SAME AUTO PROBE 2026-04-18" which are hard
+  // to distinguish in the UI. Any probe whose name exceeds the threshold
+  // gets a compact role-preserving rename. User-assigned role tokens
+  // (Refueler/Explorer/Scavenger) are kept so autopilot keeps dispatching
+  // correctly; a numeric suffix disambiguates collisions.
+  if (ceo && cfg.shortenProbeNames !== false) {
+    const MAX_NAME_CHARS = cfg.probeNameMaxChars ?? 22;
+    for (const s of ships) {
+      if (s.primary) continue;
+      if (shipKind(s.name) !== 'probe') continue;
+      if (!s.name || s.name.length <= MAX_NAME_CHARS) continue;
+      const target = shortProbeName(s, ships);
+      if (target === s.name) continue;
+      const key = `shorten:${s.name}`;
+      if (!canAct(key, 10 * 60_000)) continue;
+      pushInteractive({
+        key,
+        ship: s.name,
+        text: `rename the corp ship "${s.name}" to "${target}" — call rename_ship right now. one action, no planning, no follow-up tasks, no confirmation.`
+      });
     }
   }
 
