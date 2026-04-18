@@ -439,35 +439,22 @@ const shortProbeName = (probe, allShips = []) => {
  * Fires as a one-shot interactive prompt; agent resolves the ship_id via
  * corporation_info() and handles the purchase.
  */
-const probeReplacePrompt = (probeName, probeSector, probeWarp, primaryAtMegaport, hubSector, probeCredits, role = 'explorer', frontierSector = null, reserveName = null) => {
-  const loc = probeSector != null ? `@${probeSector}` : 'unknown sector';
-  // REMOTE SELL: sell_ship only checks the CALLER's (primary's) sector, not the
-  // target ship's sector. The probe stays put — it has 0 warp and cannot move
-  // anyway.
-  const travel = primaryAtMegaport
-    ? `your primary ship is already docked at a megaport — call sell_ship from here.`
-    : `your primary ship is NOT at a megaport. PRIORITY: primary plot_course to sector ${hubSector} and dock first, then call sell_ship from there. interrupt any current trade task — this is more valuable than a single trade loop.`;
-  const creditsNote = probeCredits != null && probeCredits > 0
-    ? ` note: ${probeName} is holding ${probeCredits} salvage credits — sell_ship refunds those to you along with the hull value, so they're recovered automatically.`
-    : '';
-  const explorerStart = frontierSector != null
-    ? `starting at sector ${frontierSector} (server pre-computed nearest unvisited frontier via map BFS — skip re-exploring known dead-ends)`
-    : `first call local_map_region to find the nearest unvisited sector from your current position and start there — do not wander through already-explored space testing known dead-ends`;
+const probeReplacePrompt = (probeName, _probeSector, _probeWarp, primaryAtMegaport, hubSector, _probeCredits, role = 'explorer', frontierSector = null, reserveName = null) => {
+  const travel = primaryAtMegaport ? '' : ` primary plot_course to sector ${hubSector} first.`;
   const shortName = role === 'refueler' ? 'Probe Refueler' : 'Probe Explorer';
-  // Preferred path: activate a reserve probe from the pre-purchased bench
-  // (PROBEA…PROBEZ). No ship_purchase credit cost and no new hull slot —
-  // just a rename. ship_purchase is the fallback when the bench is empty.
   const activationStep = reserveName
-    ? `3) rename_ship reserve probe "${reserveName}" to "${shortName}" — activating from the bench; no ship_purchase needed.`
-    : `3) ship_purchase a new Autonomous Probe and give it a short name like "${shortName}" (no date suffix, max ~22 chars) — bench was empty.`;
-  const dispatchNoun = reserveName ? `the activated probe (now "${shortName}")` : 'the new probe';
+    ? `rename "${reserveName}" to "${shortName}"`
+    : `ship_purchase Autonomous Probe and name it "${shortName}"`;
+  const exploreDirective = frontierSector != null
+    ? `from sector ${frontierSector}`
+    : `from the nearest unvisited sector (use local_map_region)`;
   const dispatchStep = role === 'refueler'
-    ? `4) DO NOT start_task — ${dispatchNoun} stands by until a fleetmate needs warp.`
-    : `4) start_task on ${dispatchNoun} to explore new sectors until it runs out of fuel, ${explorerStart}. use local_map_region each hop to pick the nearest unvisited neighbor; if all neighbors are known, transit through known space to reach fresh territory — do not halt at visited dead-ends. do not turn back to refuel.`;
+    ? `standby, no start_task`
+    : `start_task: explore ${exploreDirective}, never retreat to refuel`;
   const fetchIds = reserveName
-    ? `ship_id for both "${probeName}" (to sell) and "${reserveName}" (to rename)`
-    : `${probeName}'s ship_id`;
-  return `${probeName} is stranded ${loc} at ${probeWarp ?? 0} warp — DECOMMISSION and replace. DO NOT move ${probeName}; it has no warp and cannot travel. sell_ship only checks the primary's sector, so the primary calls it remotely on ${probeName}.${creditsNote} ${travel} sequence (primary performs all steps): 1) corporation_info to fetch ${fetchIds}. 2) sell_ship(ship_id=<${probeName}'s hex prefix>) — refund covers hull (~1000 cr) + any credits ${probeName} was holding. ${activationStep} ${dispatchStep} one action at a time, execute immediately, no confirmation.`;
+    ? `ship_ids for "${probeName}" and "${reserveName}"`
+    : `ship_id for "${probeName}"`;
+  return `decommission ${probeName}.${travel} sequence: 1) corporation_info → ${fetchIds}, 2) sell_ship ${probeName}, 3) ${activationStep}, 4) ${dispatchStep}. one action at a time, execute immediately, no confirmation.`;
 };
 
 /**
@@ -730,7 +717,7 @@ const decide = async (snapshot) => {
           pushInteractive({
             key,
             ship: reserve.name,
-            text: `no refueler in fleet — activate the bench. rename_ship reserve probe "${reserve.name}" to "Probe Refueler" so it takes over fuel delivery. one action, execute immediately, no confirmation.`
+            text: `rename "${reserve.name}" to "Probe Refueler". one action, execute immediately, no confirmation.`
           });
         }
       } else {
