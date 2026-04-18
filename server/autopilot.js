@@ -1147,23 +1147,22 @@ const decide = async (snapshot) => {
     const probeReplaceRecent = [...state.lastDecisionAt.entries()]
       .some(([k, ts]) => k.startsWith('probe-replace:') && (now - ts) < 3 * 60_000);
 
-    // Sanity guard: the HUD-scraped primary name sometimes resolves to a
-    // probe-classed token (e.g. user renamed a probe such that it ended up
-    // in the player-name element, or the primary was accidentally renamed
-    // to something like "PROBE"). Dispatching a trade route to a probe is
-    // nonsense — log and skip.
-    const primaryMisident = primary && shipKind(primary.name) === 'probe';
-    if (primaryMisident) {
-      const key = `primary-misident:${primary.name}`;
-      if (canAct(key, 10 * 60_000)) {
-        appendLog({ type: 'error', error: `primary ship resolved to probe-named "${primary.name}" — skipping trade dispatch until the primary is re-identified or renamed`, ship: primary.name });
+    // Informational warning only when the primary's name collides with the
+    // probe naming pattern — dispatch still fires because `primary: true`
+    // from the DOM is authoritative regardless of the ship's chosen name.
+    // If this is unexpected the user should rename the primary from the
+    // in-game chat (e.g. "rename my ship to X"); the primary flag stays
+    // with whichever hull the HUD player-name element points at.
+    if (primary && shipKind(primary.name) === 'probe') {
+      const key = `primary-name-warn:${primary.name}`;
+      if (canAct(key, 30 * 60_000)) {
+        appendLog({ type: 'event', intelType: 'primary-name-warning', ship: primary.name, snippet: `primary "${primary.name}" matches the probe naming pattern. trade dispatch still works (DOM primary flag is authoritative). if unexpected, rename the primary from the game chat.` });
         state.lastDecisionAt.set(key, Date.now());
       }
     }
 
     if (
       primary &&
-      !primaryMisident &&
       !primaryHasTask &&
       !probeReplaceRecent &&
       primary.warpPower != null &&
