@@ -451,10 +451,12 @@ const probeReplacePrompt = (probeName, probeSector, probeWarp, primaryAtMegaport
   const explorerStart = frontierSector != null
     ? `starting at sector ${frontierSector} (server pre-computed nearest unvisited frontier via map BFS — skip re-exploring known dead-ends)`
     : `first call local_map_region to find the nearest unvisited sector from your current position and start there — do not wander through already-explored space testing known dead-ends`;
-  const finalStep = role === 'refueler'
-    ? `4) rename_ship the new probe to "Probe Refueler" (short, no date suffix) so autopilot keeps tracking it as the fuel tanker. 5) DO NOT start_task — the refueler stands by until a fleetmate needs warp.`
-    : `4) rename_ship the new probe to "Probe Explorer" (short, no date suffix, max ~22 chars) so it's easy to distinguish from other probes. 5) start_task on the new probe to explore new sectors until it runs out of fuel, ${explorerStart}. use local_map_region each hop to pick the nearest unvisited neighbor; if all neighbors are known, transit through known space to reach fresh territory — do not halt at visited dead-ends. do not turn back to refuel.`;
-  return `${probeName} is stranded ${loc} at ${probeWarp ?? 0} warp — recycle it via REMOTE SELL. DO NOT move ${probeName}; it has no warp and cannot travel. sell_ship only checks the primary's sector, so the primary calls it remotely on ${probeName}.${creditsNote} ${travel} sequence (primary performs all steps): 1) corporation_info to fetch ${probeName}'s ship_id. 2) sell_ship(ship_id=<${probeName}'s hex prefix>) — refund covers hull (~1000 cr) + any credits ${probeName} was holding. 3) ship_purchase a new Autonomous Probe. ${finalStep} one action at a time, execute immediately, no confirmation.`;
+  const shortName = role === 'refueler' ? 'Probe Refueler' : 'Probe Explorer';
+  const purchaseStep = `3) ship_purchase a new Autonomous Probe and give it a short name like "${shortName}" (no date suffix, max ~22 chars) so autopilot keeps tracking it.`;
+  const dispatchStep = role === 'refueler'
+    ? `4) DO NOT start_task — the refueler stands by until a fleetmate needs warp.`
+    : `4) start_task on the new probe to explore new sectors until it runs out of fuel, ${explorerStart}. use local_map_region each hop to pick the nearest unvisited neighbor; if all neighbors are known, transit through known space to reach fresh territory — do not halt at visited dead-ends. do not turn back to refuel.`;
+  return `${probeName} is stranded ${loc} at ${probeWarp ?? 0} warp — recycle it via REMOTE SELL. DO NOT move ${probeName}; it has no warp and cannot travel. sell_ship only checks the primary's sector, so the primary calls it remotely on ${probeName}.${creditsNote} ${travel} sequence (primary performs all steps): 1) corporation_info to fetch ${probeName}'s ship_id. 2) sell_ship(ship_id=<${probeName}'s hex prefix>) — refund covers hull (~1000 cr) + any credits ${probeName} was holding. ${purchaseStep} ${dispatchStep} one action at a time, execute immediately, no confirmation.`;
 };
 
 /**
