@@ -70,18 +70,11 @@ const probeExplorePrompt = (probe, target, opts) => probeTaskPrompt(probe, 'expl
 const scavengerPrompt = (scav, target, opts) => probeTaskPrompt(scav, 'scavenger', target, opts);
 const explorerPrompt = (expl, target, opts) => probeTaskPrompt(expl, 'explorer', target, opts);
 
-const haulerTradePrompt = (hauler) => {
-  const route = state.config?.haulerPreferredRoute;
-  if (route?.buyAt != null && route?.sellAt != null && route?.commodity) {
-    const note = route.note ? ` ${route.note}.` : '';
-    return `${hauler}: PREFERRED ROUTE — buy ${route.commodity} at sector ${route.buyAt}, sell at sector ${route.sellAt}, repeat.${note} fill cargo on every buy. if stock depletes below profitability, pick any other fedspace trade.` + standingOrders(hauler);
-  }
-  return pick([
-    `${hauler}: trade in fedspace, route is your call.`,
-    `${hauler}: start trading in fedspace — pick whatever route looks best.`,
-    `${hauler}: fedspace trade run, your choice of ports.`
-  ]) + standingOrders(hauler);
-};
+const haulerTradePrompt = (hauler) => pick([
+  `${hauler}: trade in fedspace, route is your call.`,
+  `${hauler}: start trading in fedspace — pick whatever route looks best.`,
+  `${hauler}: fedspace trade run, your choice of ports.`
+]) + standingOrders(hauler);
 
 // The agent categorically refuses to run bank_deposit interactively — its
 // standing rule is "banking operations require a dedicated task." So we
@@ -209,11 +202,14 @@ const DEFAULTS = {
   probeSlots: 2,                   // 2 probes for map expansion (explorer/scavenger) — refueler doesn't count
   tradeSlots: 1,                   // 1 corp hauler on a fedspace trade loop; fleet prioritises exploration
   primaryDispatchCooldownSec: 300,  // 5 min — tight enough to refill the local slot quickly when a task ends
-  // Optional: override the generic "NS loop" dispatch with specific arbitrage
-  // routes. Shape: { buyAt, sellAt, commodity, note }. Two fields — one for
-  // the primary ship, one for all corp haulers. Set via data/config.json.
+  // Optional: override the primary's generic fedspace dispatch with a
+  // specific arbitrage route. Shape: { buyAt, sellAt, commodity, note }.
+  // Corp haulers are intentionally non-prescriptive (they pick their own
+  // routes) so `haulerPreferredRoute` is no longer honored and is kept only
+  // as a deprecated placeholder so older data/config.json files don't fail
+  // validation on load.
   primaryPreferredRoute: null,
-  haulerPreferredRoute: null,
+  haulerPreferredRoute: null, // deprecated — ignored
   megaports: [305, 472, 1413],      // known mega-port sectors — add more as probes discover them
   homeHub: 1413,                    // preferred dock for fuel/banking — the fleet's home base
   shortenProbeNames: true,          // auto-rename probes whose name exceeds probeNameMaxChars
