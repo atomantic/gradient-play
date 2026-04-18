@@ -174,7 +174,14 @@ export const buildRefuelerRescuePlan = (target, donor, { transferAmt = 300 } = {
     nagMs: 90_000,
     maxMs: 10 * 60_000,
     isDone: (snap, _ship, plan) => {
-      const t = (snap?.extracted?.ships || []).find((s) => s.name === targetName);
+      const byName = snap?.extracted?.ships || [];
+      const t = byName.find((s) => s.name === targetName);
+      const d = byName.find((s) => s.name === donorName);
+      // Donor is out of warp — whatever it had is spent (either on the
+      // plot_course leg or an already-completed transfer). No point nagging
+      // a transfer_warp_power it can't fulfil; end the plan and let the
+      // regular scrap loop recycle the empty probe.
+      if (d && d.warpPower != null && d.warpPower <= 10) return true;
       if (!t || t.warpPower == null) return false;
       const baseline = plan.context.targetWarpBefore ?? 0;
       return t.warpPower >= baseline + Math.floor(transferAmt * 0.5);
