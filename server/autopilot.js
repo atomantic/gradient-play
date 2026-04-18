@@ -431,32 +431,6 @@ const hopDistances = (sectors, fromSectorId) => {
 };
 
 /**
- * Compute a short, role-preserving target name for a probe. Fresh purchases
- * sometimes arrive auto-named with date strings ("SAME AUTO PROBE 2026-04-18"),
- * which are hard to distinguish visually. Multiple probes in the same role
- * get a numeric suffix so names stay unique.
- */
-const shortProbeName = (probe, allShips = []) => {
-  const role = probeRole(probe.name);
-  const base = role === 'refueler' ? 'Probe Refueler'
-    : role === 'explorer' ? 'Probe Explorer'
-    : role === 'scavenger' ? 'Probe Scavenger'
-    : 'Probe';
-  const collides = allShips.some((x) => x.name !== probe.name && x.name === base);
-  if (!collides) return base;
-  const rx = new RegExp(`^${base}\\s+(\\d+)$`, 'i');
-  const used = new Set();
-  for (const x of allShips) {
-    if (x.name === probe.name) continue;
-    const m = x.name.match(rx);
-    if (m) used.add(Number(m[1]));
-  }
-  let n = 2; // 1 is implied by the unsuffixed base name
-  while (used.has(n)) n += 1;
-  return `${base} ${n}`;
-};
-
-/**
  * Remote-sell a stranded probe and replace it with a fresh one. strategy.md
  * §7: sell_ship only checks the caller's personal-ship location (megaport in
  * fedspace), not the probe's sector. Stranded probes at 0 warp deep in neutral
@@ -775,25 +749,22 @@ const decide = async (snapshot) => {
   }
 
   // Auto-shorten long probe names. Fresh purchases sometimes arrive with
-  // date-stamped auto-names like "SAME AUTO PROBE 2026-04-18" which are hard
-  // to distinguish in the UI. Any probe whose name exceeds the threshold
-  // gets a compact role-preserving rename. User-assigned role tokens
-  // (Refueler/Explorer/Scavenger) are kept so autopilot keeps dispatching
-  // correctly; a numeric suffix disambiguates collisions.
+  // date-stamped auto-names like "SAME AUTO PROBE 2026-04-18" which are
+  // hard to distinguish in the UI. Ask the agent to pick a short unique
+  // name — it already knows the fleet's existing names and can avoid
+  // collisions, which a server-side computed target can't do robustly.
   if (ceo && cfg.shortenProbeNames !== false) {
     const MAX_NAME_CHARS = cfg.probeNameMaxChars ?? 22;
     for (const s of ships) {
       if (s.primary) continue;
       if (shipKind(s.name) !== 'probe') continue;
       if (!s.name || s.name.length <= MAX_NAME_CHARS) continue;
-      const target = shortProbeName(s, ships);
-      if (target === s.name) continue;
       const key = `shorten:${s.name}`;
       if (!canAct(key, 10 * 60_000)) continue;
       pushInteractive({
         key,
         ship: s.name,
-        text: `rename the corp ship "${s.name}" to "${target}" — call rename_ship right now. one action, no planning, no follow-up tasks, no confirmation.`
+        text: `rename_ship "${s.name}" to a short unique name (no date suffix, max ~22 chars). one action, execute immediately, no confirmation.`
       });
     }
   }
