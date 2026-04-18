@@ -156,6 +156,68 @@ export const buildRefuelPlan = (ship, { creditsForRefuel = 1000, megaports = [],
   });
 };
 
+/**
+ * Refueler-rescue plan: the refueler probe travels to a low-fuel ship's
+ * sector and transfer_warp_power tops it up. Replaces the old megaport
+ * recharge flow — per user directive, fuel comes from refueler probes only;
+ * ships never call recharge_warp_power. When the refueler itself runs low
+ * it's remote-sold and replaced (probes come fully fueled).
+ *
+ * Keyed by the REFUELER (it's the active executor, so this blocks it from
+ * other dispatches). The target ship is listed in context.blockedShips so
+ * decide() leaves it alone until the rescue completes.
+ */
+export const buildRefuelerRescuePlan = (target, refueler, { transferAmt = 300 } = {}) => {
+  const targetName = target.name;
+  const refuelerName = refueler.name;
+  const targetSector = target.sector;
+  const steps = [];
+
+  // Step 1: route refueler to the (already idle) target. Haulers are left to
+  // trade until they run out of fuel, so by the time this plan fires the
+  // target is parked. DO NOT instruct recharge_warp_power — fuel comes from
+  // the refueler only.
+  steps.push({
+    name: 'refueler-route',
+    prompt: `FUEL DELIVERY. ${targetName} is idle at ${target.warpPower ?? 0} warp in sector ${targetSector}. ${refuelerName}: plot_course to sector ${targetSector} to rendezvous with ${targetName}. DO NOT call recharge_warp_power anywhere — all fuel in this fleet is delivered by ${refuelerName} via transfer_warp_power. one action, execute immediately, no confirmation.`,
+    nagMs: 120_000,
+    maxMs: 8 * 60_000,
+    isDone: (snap) => {
+      const r = (snap?.extracted?.ships || []).find((s) => s.name === refuelerName);
+      const t = (snap?.extracted?.ships || []).find((s) => s.name === targetName);
+      if (!r || !t) return false;
+      return r.sector != null && t.sector != null && r.sector === t.sector;
+    }
+  });
+
+  // Step 2: transfer warp. Target's warp jumping is the observable signal.
+  steps.push({
+    name: 'refueler-transfer',
+    prompt: `${refuelerName} is co-located with ${targetName}. call transfer_warp_power ${transferAmt} from ${refuelerName} to ${targetName}. one action, execute immediately, no confirmation.`,
+    nagMs: 60_000,
+    maxMs: 3 * 60_000,
+    isDone: (snap, _ship, plan) => {
+      const t = (snap?.extracted?.ships || []).find((s) => s.name === targetName);
+      if (!t || t.warpPower == null) return false;
+      const baseline = plan.context.targetWarpBefore ?? 0;
+      return t.warpPower >= baseline + Math.floor(transferAmt * 0.5);
+    }
+  });
+
+  return newPlan({
+    ship: refuelerName,
+    goal: 'refueler-rescue',
+    steps,
+    context: {
+      target: targetName,
+      refueler: refuelerName,
+      transferAmt,
+      targetWarpBefore: target.warpPower ?? 0,
+      blockedShips: [targetName]
+    }
+  });
+};
+
 // ── Fleet-wide rally plan ────────────────────────────────────────────
 // Sentinel key: plans.set('__fleet__', plan). processPlans detects this
 // and passes ship=null to isDone (steps use the full snapshot instead).

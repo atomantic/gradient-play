@@ -19,6 +19,8 @@ const DEFAULT_CONFIG = {
   considerUpgrades: true,
   upgradeCreditsThreshold: 100000,
   corpTaskCap: 3,
+  probeSlots: 2,
+  tradeSlots: 1,
   primaryDispatchCooldownSec: 300,
   enabled: { refuel: true, explore: true, trade: true, bank: true, upgrade: true, primary: true },
   strategyAdvisor: { enabled: false, intervalSec: 900, providerId: null, model: null }
@@ -285,6 +287,21 @@ export const AutopilotPanel = () => {
                 onChange={(e) => setConfig({ ...config, corpTaskCap: Number(e.target.value) })}
                 className="bg-slate-950 border border-slate-800 rounded px-1 py-0.5 w-16" />
             </label>
+            <label className="flex items-center gap-1">
+              <span className="text-slate-400 w-24">Probe slots</span>
+              <input type="number" min={0} max={6} value={config.probeSlots ?? 2}
+                onChange={(e) => setConfig({ ...config, probeSlots: Number(e.target.value) })}
+                className="bg-slate-950 border border-slate-800 rounded px-1 py-0.5 w-16" />
+            </label>
+            <label className="flex items-center gap-1">
+              <span className="text-slate-400 w-24">Trade slots</span>
+              <input type="number" min={0} max={6} value={config.tradeSlots ?? 1}
+                onChange={(e) => setConfig({ ...config, tradeSlots: Number(e.target.value) })}
+                className="bg-slate-950 border border-slate-800 rounded px-1 py-0.5 w-16" />
+            </label>
+          </div>
+          <div className="text-[10px] text-slate-500 -mt-0.5">
+            Probe slots: concurrent explorer/scavenger probes. Trade slots: concurrent corp haulers on trade loops. Refueler probes don't count against either — they stand by for fuel dispatches.
           </div>
           <div className="flex flex-wrap gap-x-3 gap-y-1 pt-1">
             <label className="flex items-center gap-1 text-amber-300 font-semibold">
