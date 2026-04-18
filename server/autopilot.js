@@ -375,11 +375,13 @@ const markSeen = (key) => {
 
 const shipKind = (name = '') => {
   const n = name.toUpperCase();
-  if (/PROBE|EXPLORER|SCAVENGER|SALVAGER|SCOUT|PATHFINDER/.test(n)) return 'probe';
+  // Check specific hull classes FIRST — a ship named like "ANTIC PROBE
+  // KESTREL" must resolve to trader-light (Kestrel hull) even though
+  // "PROBE" appears in the name. Otherwise role-based dispatch misroutes.
   if (/HAULER|FREIGHTER|LIFTER|ATLAS|PIONEER|WAYFARER|WAREZ|TRADER/.test(n)) return 'hauler';
   if (/KESTREL|SPARROW|COURIER/.test(n)) return 'trader-light';
   if (/CORSAIR|PIKE|BULWARK|AEGIS|SOVEREIGN|RAIDER|FRIGATE|DESTROYER|CRUISER/.test(n)) return 'combat';
-  if (/REFUELER|TANKER|FUEL/.test(n)) return 'probe';
+  if (/PROBE|EXPLORER|SCAVENGER|SALVAGER|SCOUT|PATHFINDER|REFUELER|TANKER|FUEL/.test(n)) return 'probe';
   return 'unknown';
 };
 
@@ -689,8 +691,12 @@ const decide = async (snapshot) => {
 
   const claimedDonors = new Set();
   const pickDonor = (target, mapSectors) => {
+    // Strictly probes only — no primary, no haulers, no combat ships. Even if
+    // a non-probe hull's name coincidentally matches the probe regex, the
+    // primary flag and hull-class check above keep it out of the donor pool.
     const candidates = ships.filter((s) =>
-      shipKind(s.name) === 'probe'
+      !s.primary
+      && shipKind(s.name) === 'probe'
       && s.name !== target.name
       && !claimedDonors.has(s.name)
       && !shipInAnyPlan(s.name)
@@ -1108,8 +1114,23 @@ const decide = async (snapshot) => {
     const probeReplaceRecent = [...state.lastDecisionAt.entries()]
       .some(([k, ts]) => k.startsWith('probe-replace:') && (now - ts) < 3 * 60_000);
 
+    // Sanity guard: the HUD-scraped primary name sometimes resolves to a
+    // probe-classed token (e.g. user renamed a probe such that it ended up
+    // in the player-name element, or the primary was accidentally renamed
+    // to something like "PROBE"). Dispatching a trade route to a probe is
+    // nonsense — log and skip.
+    const primaryMisident = primary && shipKind(primary.name) === 'probe';
+    if (primaryMisident) {
+      const key = `primary-misident:${primary.name}`;
+      if (canAct(key, 10 * 60_000)) {
+        appendLog({ type: 'error', error: `primary ship resolved to probe-named "${primary.name}" — skipping trade dispatch until the primary is re-identified or renamed`, ship: primary.name });
+        state.lastDecisionAt.set(key, Date.now());
+      }
+    }
+
     if (
       primary &&
+      !primaryMisident &&
       !primaryHasTask &&
       !probeReplaceRecent &&
       primary.warpPower != null &&

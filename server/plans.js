@@ -238,10 +238,11 @@ export const buildFleetRallyPlan = (ships = [], { keepCredits = 1000, megaports 
 
   const steps = [];
 
-  // Step 1: fuel-share
+  // Step 1: fuel-share. Donors are probes only — never the primary or any
+  // hauler. If no probe has spare warp, skip this step and move to rally.
   steps.push({
     name: 'fuel-share',
-    prompt: `transfer_warp_power from fleetmates to any ship with warp < ${MIN_WARP_TO_MOVE}, enough to reach ≥ ${MIN_WARP_TO_MOVE * 3}. fleet: ${fleetLabel}. leave probes alone (they run dry by design). no new tasks.${EXEC_NOW}`,
+    prompt: `transfer_warp_power from any probe with spare warp to any non-probe ship with warp < ${MIN_WARP_TO_MOVE}, enough to reach ≥ ${MIN_WARP_TO_MOVE * 3}. fleet: ${fleetLabel}. donors must be probes (never the primary, never a hauler). no new tasks.${EXEC_NOW}`,
     nagMs: 120_000,
     maxMs: 6 * 60_000,
     isDone: (snap) => {
