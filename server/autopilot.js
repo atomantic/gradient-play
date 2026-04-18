@@ -802,13 +802,15 @@ const decide = async (snapshot) => {
   // auto-replace and log a notice — the user may want to inspect or keep the
   // ship_id alive. sell_ship DOES refund those credits, so this guard is
   // conservative; remove it if you want fully-automatic recycling.
-  // Only scrap a probe when it's effectively DRY (≤10 warp). Residual warp
-  // is wasted credits on sell (sell refund is hull-based, not fuel-based),
-  // so we keep re-dispatching probes until they burn through. The dispatch
-  // loop uses PROBE_MIN_DISPATCH_WARP=10 so probes with 10-199 warp keep
-  // getting new tasks — only when they hit the near-zero floor do we sell.
+  // Only scrap a probe when it's literally at 0 warp. sell refund is
+  // hull-based (not fuel-based), so any residual warp is better spent on
+  // "maybe one more hop to an unvisited sector" than wasted in a sale.
+  // Matched by PROBE_MIN_DISPATCH_WARP=1 below so there's no gap.
   if (ceo && cfg.enabled.refuel && primaryShip) {
-    const SCRAP_WARP_CEILING = 10;
+    // Run probes completely dry before scrapping — even 1-5 warp might be
+    // enough to reach one more known-unvisited sector before the probe
+    // halts. Only scrap at literal zero.
+    const SCRAP_WARP_CEILING = 0;
     const primaryAtMegaport = primaryShip.sector != null && megaportSet.has(primaryShip.sector);
     // New probe spawns wherever the primary is docked when it calls
     // ship_purchase. That's the primary's current sector when it's already at
@@ -894,7 +896,10 @@ const decide = async (snapshot) => {
   // literally to run dry, so we want to keep re-dispatching it on every leftover
   // drop of warp until it hits 0, at which point the probe-replace path
   // scraps it. Anything below 10 is too low to be productive.
-  const PROBE_MIN_DISPATCH_WARP = 10;
+  // Keep re-dispatching probes until they're literally empty. Matches the
+  // SCRAP_WARP_CEILING=0 floor so there's no gap where a probe is too low
+  // to dispatch but not low enough to scrap.
+  const PROBE_MIN_DISPATCH_WARP = 1;
   const haulerMinWarp = cfg.dispatchMinWarp ?? cfg.minWarp;
   const idleProbes = corpShips.filter((s) =>
     s.active === false
