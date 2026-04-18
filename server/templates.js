@@ -68,8 +68,14 @@ const builtins = [
   {
     name: 'Probe: autonomous exploration',
     spec: {
-      goal: 'Start an autonomous exploration task on this ship: visit every sector within 40 hops that I have not yet mapped.',
-      guardrails: ['Flee all combat', 'Do not attempt trades (0 cargo)'],
+      // Goal mirrors autopilot's explorer prompt (server/autopilot.js
+      // probeTaskPrompt). {{startSector}} is resolved at mission create time:
+      // user-supplied Starting sector field wins, otherwise the server walks
+      // the React fiber's known-sector map and picks the nearest unvisited
+      // frontier via BFS through visited space. Override via the composer if
+      // you have a specific target in mind.
+      goal: 'Start an autonomous exploration task on this ship. Go as far as you can exploring new sectors until you run out of fuel, starting at sector {{startSector}}. Use local_map_region each hop to pick the nearest unvisited neighbor. Prefer unvisited hops; if all neighbors are already known, transit through known sectors to reach fresh territory — do not halt just because the immediate neighbors are visited. Do not turn back to refuel.',
+      guardrails: ['Flee all combat', 'Do not attempt trades (0 cargo)', 'Avoid tolls and hostile garrisons'],
       intervalSec: 30,
       nudgeAfterIdleSec: 270,
       abortWhen: [{ metric: 'warpPower', op: '<', value: 20 }]

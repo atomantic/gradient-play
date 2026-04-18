@@ -1,5 +1,47 @@
 import { randomUUID } from 'node:crypto';
-import { getGameSnapshot, sendAssistantPrompt } from './cdp.js';
+import { getGameSnapshot, sendAssistantPrompt, getMapSectors } from './cdp.js';
+import { findNearestFrontier } from './autopilot.js';
+
+// Placeholder that missions can embed in their goal to get the server-side
+// frontier BFS (same logic autopilot uses for probe dispatch) interpolated in
+// at kickoff time. User can override via spec.startSector.
+const STARTING_SECTOR_TOKEN = /\{\{\s*startSector\s*\}\}/g;
+
+/**
+ * Resolve a concrete starting sector for an exploration-style mission.
+ *   - spec.startSector (number) → user override wins.
+ *   - Otherwise, if the goal contains {{startSector}}, walk the React fiber's
+ *     known-sector map via getMapSectors and pick the nearest unvisited
+ *     frontier (same BFS the autopilot uses for probe dispatch).
+ *   - If nothing's reachable (no map, no unvisited neighbours) return null so
+ *     the caller can swap in a "pick one nearby" fallback string.
+ */
+const resolveStartSector = async (spec) => {
+  if (spec.startSector != null && Number.isFinite(Number(spec.startSector))) {
+    return { sector: Number(spec.startSector), source: 'user-override' };
+  }
+  if (!STARTING_SECTOR_TOKEN.test(spec.goal || '')) return { sector: null };
+  STARTING_SECTOR_TOKEN.lastIndex = 0;
+  const snap = await getGameSnapshot().catch(() => null);
+  const ex = snap?.extracted || {};
+  const ship = spec.targetShip
+    ? (ex.ships || []).find((s) => s.name === spec.targetShip)
+    : ((ex.ships || []).find((s) => s.primary) || null);
+  const from = ship?.sector ?? ex.sector ?? null;
+  if (from == null) return { sector: null, error: 'origin sector unknown' };
+  const map = await getMapSectors().catch((err) => ({ ok: false, error: err.message }));
+  if (!map?.ok) return { sector: null, error: map?.error || 'map fetch failed' };
+  const frontier = findNearestFrontier(map.sectors, from);
+  if (!frontier) return { sector: null, error: 'no unvisited frontier reachable via known space' };
+  return { sector: frontier.sector, source: 'frontier-bfs', hops: frontier.hops };
+};
+
+const interpolateStartSector = (goal, resolved) => {
+  const replacement = resolved?.sector != null
+    ? String(resolved.sector)
+    : 'pick the nearest unvisited sector from your current position';
+  return (goal || '').replace(STARTING_SECTOR_TOKEN, replacement);
+};
 
 const missions = new Map();
 const logSubscribers = new Map();
@@ -290,17 +332,25 @@ const scheduleNext = (mission) => {
 };
 
 export const createMission = async (spec) => {
+  // Resolve the starting sector (user override or server-side BFS) before we
+  // freeze the goal text. Missions that don't use {{startSector}} skip the
+  // DOM read entirely — resolveStartSector short-circuits when the placeholder
+  // isn't present in the goal.
+  const startRes = await resolveStartSector(spec).catch((err) => ({ sector: null, error: err.message }));
+  const goalText = interpolateStartSector(spec.goal, startRes);
   const mission = {
     id: randomUUID(),
     spec: {
-      goal: String(spec.goal),
+      goal: String(goalText),
       targetShip: spec.targetShip ? String(spec.targetShip) : null,
       guardrails: Array.isArray(spec.guardrails) ? spec.guardrails : [],
       intervalSec: Number(spec.intervalSec) || 30,
       nudgeAfterIdleSec: spec.nudgeAfterIdleSec === 0 ? 0 : (Number(spec.nudgeAfterIdleSec) || 270),
       abortWhen: Array.isArray(spec.abortWhen) ? spec.abortWhen : [],
       stopWhen: Array.isArray(spec.stopWhen) ? spec.stopWhen : [],
-      maxTicks: Number(spec.maxTicks) || 0
+      maxTicks: Number(spec.maxTicks) || 0,
+      startSector: startRes?.sector ?? null,
+      startSectorSource: startRes?.source ?? null
     },
     lastPromptAt: 0,
     status: 'running',
@@ -314,7 +364,13 @@ export const createMission = async (spec) => {
     timer: null
   };
   missions.set(mission.id, mission);
-  appendLog(mission, { type: 'start', goal: mission.spec.goal });
+  appendLog(mission, {
+    type: 'start',
+    goal: mission.spec.goal,
+    startSector: mission.spec.startSector,
+    startSectorSource: mission.spec.startSectorSource,
+    startSectorError: startRes?.error || null
+  });
 
   await runTick(mission).catch((err) => {
     appendLog(mission, { type: 'error', error: err.message });

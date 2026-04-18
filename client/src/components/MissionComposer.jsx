@@ -12,7 +12,8 @@ const emptySpec = () => ({
   nudgeAfterIdleSec: 270,
   abortWhen: [],
   stopWhen: [],
-  maxTicks: 0
+  maxTicks: 0,
+  startSector: ''
 });
 
 const ConditionEditor = ({ label, list, onChange }) => {
@@ -70,10 +71,19 @@ export const MissionComposer = ({ templates = [], ships = [], onCreate, onSaveTe
     setSaveName('');
   };
 
-  const buildSpec = () => ({
-    ...spec,
-    guardrails: guardrailText.split('\n').map((l) => l.trim()).filter(Boolean)
-  });
+  const buildSpec = () => {
+    const startSectorRaw = typeof spec.startSector === 'string'
+      ? spec.startSector.trim()
+      : spec.startSector;
+    const startSector = startSectorRaw === '' || startSectorRaw == null
+      ? null
+      : Number(startSectorRaw);
+    return {
+      ...spec,
+      startSector: Number.isFinite(startSector) ? startSector : null,
+      guardrails: guardrailText.split('\n').map((l) => l.trim()).filter(Boolean)
+    };
+  };
 
   const create = () => {
     const built = buildSpec();
@@ -193,6 +203,22 @@ export const MissionComposer = ({ templates = [], ships = [], onCreate, onSaveTe
           className="w-full bg-slate-950 border border-slate-800 rounded p-2 text-sm resize-none focus:outline-none focus:border-cyan-600"
         />
       </div>
+
+      {/\{\{\s*startSector\s*\}\}/.test(spec.goal || '') ? (
+        <div>
+          <div className="text-[11px] uppercase tracking-wide text-slate-500 mb-1">
+            Starting sector <span className="text-slate-600 normal-case">— leave blank to auto-pick the nearest unvisited hex from the target ship's position</span>
+          </div>
+          <input type="number" min={0}
+            value={spec.startSector ?? ''}
+            onChange={(e) => setSpec({ ...spec, startSector: e.target.value })}
+            placeholder="auto (frontier BFS)"
+            className="w-full bg-slate-950 border border-slate-800 rounded px-2 py-1 text-sm focus:outline-none focus:border-cyan-600" />
+          <div className="text-[10px] text-slate-500 mt-1">
+            Goal references <span className="font-mono text-slate-400">{'{{startSector}}'}</span>. On launch the server walks the React-fiber sector map and picks the nearest unvisited neighbour via BFS (same logic autopilot uses). Type a sector number here to override.
+          </div>
+        </div>
+      ) : null}
 
       <div>
         <div className="text-[11px] uppercase tracking-wide text-slate-500 mb-1">Guardrails (one per line)</div>

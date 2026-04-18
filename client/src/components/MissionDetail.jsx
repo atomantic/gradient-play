@@ -13,6 +13,15 @@ const entryColor = (type) => ({
 }[type] || 'text-slate-400');
 
 const formatEntry = (e) => {
+  if (e.type === 'start') {
+    if (e.startSector != null) {
+      return `start — starting sector ${e.startSector} (${e.startSectorSource || 'resolved'})`;
+    }
+    if (e.startSectorError) {
+      return `start — starting sector: ${e.startSectorError}`;
+    }
+    return 'start' + (e.goal ? ': ' + e.goal.slice(0, 120) : '');
+  }
   if (e.type === 'kickoff' || e.type === 'nudge') return e.text;
   if (e.type === 'tick') {
     const s = e.snapshot || {};
