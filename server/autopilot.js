@@ -399,11 +399,36 @@ const probeRole = (name = '') => {
 
 /**
  * Reserve probes are pre-purchased, unassigned inventory named with the
- * pattern PROBEA…PROBEZ (single-letter suffix). Autopilot treats them as a
- * bench — not dispatched for exploration and not scrapped; activated by
- * rename when a role probe is decommissioned or missing.
+ * pattern PROBEA…PROBEZ (single-letter suffix). Autopilot keeps them out
+ * of the explorer dispatch loop so they sit idle on the bench, but they
+ * are eligible fuel donors and can be activated via rename.
  */
 const isReserveProbe = (name = '') => /^PROBE[A-Z]$/i.test(String(name).trim());
+
+/**
+ * BFS hop-distance lookup from an origin sector. Returns a Map<sectorId,
+ * hops>. Sectors unreachable through the visited-space graph are simply
+ * absent. Used to score fuel-donor candidates by proximity to the target.
+ */
+const hopDistances = (sectors, fromSectorId) => {
+  const dist = new Map();
+  if (!Array.isArray(sectors) || fromSectorId == null) return dist;
+  const by = new Map(sectors.map((s) => [s.id, s]));
+  if (!by.has(fromSectorId)) return dist;
+  dist.set(fromSectorId, 0);
+  const queue = [fromSectorId];
+  while (queue.length) {
+    const cur = queue.shift();
+    const node = by.get(cur);
+    if (!node) continue;
+    for (const nb of node.adj || []) {
+      if (dist.has(nb)) continue;
+      dist.set(nb, dist.get(cur) + 1);
+      queue.push(nb);
+    }
+  }
+  return dist;
+};
 
 /**
  * Compute a short, role-preserving target name for a probe. Fresh purchases
@@ -439,18 +464,15 @@ const shortProbeName = (probe, allShips = []) => {
  * Fires as a one-shot interactive prompt; agent resolves the ship_id via
  * corporation_info() and handles the purchase.
  */
-const probeReplacePrompt = (probeName, _probeSector, _probeWarp, primaryAtMegaport, hubSector, _probeCredits, role = 'explorer', frontierSector = null, reserveName = null) => {
+const probeReplacePrompt = (probeName, _probeSector, _probeWarp, primaryAtMegaport, hubSector, _probeCredits, _role = 'explorer', frontierSector = null, reserveName = null) => {
   const travel = primaryAtMegaport ? '' : ` primary plot_course to sector ${hubSector} first.`;
-  const shortName = role === 'refueler' ? 'Probe Refueler' : 'Probe Explorer';
   const activationStep = reserveName
-    ? `rename "${reserveName}" to "${shortName}"`
-    : `ship_purchase Autonomous Probe and name it "${shortName}"`;
+    ? `rename "${reserveName}" to a short name`
+    : `ship_purchase Autonomous Probe and give it a short name (no date suffix)`;
   const exploreDirective = frontierSector != null
     ? `from sector ${frontierSector}`
     : `from the nearest unvisited sector (use local_map_region)`;
-  const dispatchStep = role === 'refueler'
-    ? `standby, no start_task`
-    : `start_task: explore ${exploreDirective}, never retreat to refuel`;
+  const dispatchStep = `start_task: explore ${exploreDirective}, never retreat to refuel`;
   const fetchIds = reserveName
     ? `ship_ids for "${probeName}" and "${reserveName}"`
     : `ship_id for "${probeName}"`;
@@ -633,13 +655,12 @@ const decide = async (snapshot) => {
   };
   const pushInteractive = (d) => out.push({ ...d, createsTask: false });
 
-  // Fuel guard. Fleet fuel policy (2026-04): all fuel comes from a dedicated
-  // refueler probe. Ships NEVER call recharge_warp_power. Active haulers run
-  // their trades until the task naturally ends for lack of warp; once idle
-  // below dispatchMinWarp, the refueler plot_courses to them and
-  // transfer_warp_power tops them up. The refueler itself is disposable —
-  // when its warp drops below useful it's remote-sold and replaced (fresh
-  // probes come fully fueled; the replace prompt asks for a rename).
+  // Fuel guard. Fleet fuel policy: ships never call recharge_warp_power.
+  // Active haulers run their trades until the task naturally ends for lack
+  // of warp; once idle below dispatchMinWarp, any nearby probe is picked as
+  // donor and dispatched to transfer_warp_power. Donor selection is
+  // proximity-based (BFS hop distance), so reserves, idle explorers, or a
+  // user-named "Probe Refueler" all qualify equally.
   const megaportSet = new Set(megaportSectors());
   const primaryShip = ships.find((s) => s.primary);
   const primaryName = primaryShip?.name || 'the primary ship';
@@ -647,21 +668,12 @@ const decide = async (snapshot) => {
     && primaryShip.active === false
     && !shipInAnyPlan(primaryShip.name);
 
-  // Designated refueler probe. One at a time — if the user has named more than
-  // one probe as a refueler, we pick the best-fueled and treat the rest as
-  // generic probes (they'll run dry and get scrapped via probe-replace).
-  const refuelerProbe = ships
-    .filter((s) => shipKind(s.name) === 'probe' && probeRole(s.name) === 'refueler')
-    .sort((a, b) => (b.warpPower ?? 0) - (a.warpPower ?? 0))[0] || null;
-
-  // Reserve bench: pre-purchased probes named PROBEA…PROBEZ that sit idle
-  // until activated via rename. When a role probe is decommissioned we pull
-  // from this list instead of calling ship_purchase. Sorted alphabetically so
-  // activation is deterministic.
+  // Reserve bench — pre-purchased probes (PROBEA…PROBEZ). Sorted
+  // alphabetically so activation is deterministic. They're donor-eligible
+  // and also serve as the first choice when a dead probe needs replacing.
   const reserveProbes = ships
     .filter((s) => isReserveProbe(s.name))
     .sort((a, b) => a.name.localeCompare(b.name));
-  // Tick-scoped claim set so two scrap paths don't race for the same reserve.
   const claimedReserves = new Set();
   const claimReserve = () => {
     for (const r of reserveProbes) {
@@ -672,134 +684,93 @@ const decide = async (snapshot) => {
     return null;
   };
 
-  // Useful-warp threshold for the refueler: below this it can't meaningfully
-  // travel AND transfer enough to top up a target. Triggers the scrap+rebuy
-  // path instead of a rescue dispatch.
-  const REFUELER_MIN_USEFUL_WARP = 150;
-  const REFUELER_SCRAP_WARP = 150;
+  const MIN_DONOR_WARP = 50; // enough to reach a nearby target and transfer a usable amount
 
-  // Idle ship → needs-rescue candidates. Only dispatch for ships that are
-  // actually parked (active === false). Active haulers run until the game
-  // naturally ends their task for lack of warp — we don't interrupt trades.
-  // Skip non-refueler probes: they're designed to run dry and get replaced.
   const isRescueCandidate = (s) => {
     if (!s) return false;
     if (s.warpPower == null) return false;
     if (s.active === true) return false;
     if (shipInAnyPlan(s.name)) return false;
-    if (shipKind(s.name) === 'probe' && probeRole(s.name) !== 'refueler') return false;
-    if (s === refuelerProbe) return false; // refueler handled by scrap path below
-    if (!ceo && !s.primary) return false; // non-CEO only rescues primary
+    // Probes are disposable — don't refuel them, scrap + replace instead.
+    if (shipKind(s.name) === 'probe') return false;
+    if (!ceo && !s.primary) return false;
     const threshold = cfg.dispatchMinWarp ?? cfg.minWarp ?? 200;
     return s.warpPower < threshold;
   };
 
-  // Prioritise by urgency: lowest warp first.
   const rescueCandidates = ships
     .filter(isRescueCandidate)
     .sort((a, b) => (a.warpPower ?? 0) - (b.warpPower ?? 0));
 
-  if (cfg.enabled.refuel && rescueCandidates.length > 0) {
-    const refuelerBusy = refuelerProbe ? shipInAnyPlan(refuelerProbe.name) : false;
-    const refuelerDry = !refuelerProbe
-      || refuelerProbe.warpPower == null
-      || refuelerProbe.warpPower < REFUELER_MIN_USEFUL_WARP;
+  // Lazy-loaded map for donor BFS. Only fetched when we actually need to
+  // rescue someone — the autopilot's 30s internal map cache keeps repeated
+  // calls within a tick cheap.
+  let rescueMap = null;
+  const loadRescueMap = async () => {
+    if (rescueMap !== null) return rescueMap;
+    const r = await getMapSectors().catch(() => null);
+    rescueMap = r?.ok ? r.sectors : [];
+    return rescueMap;
+  };
 
-    if (!refuelerProbe) {
-      // Auto-activate from the reserve bench if we have one available —
-      // renaming PROBEA to "Probe Refueler" promotes it into the role and
-      // the next tick's fuel guard can dispatch it. Fire as a one-shot
-      // rename (primary doesn't need to be co-located for rename_ship).
-      const reserve = ceo ? claimReserve() : null;
-      if (reserve) {
-        const key = `activate-refueler:${reserve.name}`;
-        if (canAct(key, cfg.rescueCooldownSec * 1000)) {
-          pushInteractive({
-            key,
-            ship: reserve.name,
-            text: `rename "${reserve.name}" to "Probe Refueler". one action, execute immediately, no confirmation.`
-          });
-        }
-      } else {
-        for (const s of rescueCandidates) {
-          const key = `no-refueler:${s.name}`;
-          if (canAct(key, cfg.rescueCooldownSec * 1000)) {
-            appendLog({
-              type: 'event',
-              intelType: 'no-refueler-available',
-              ship: s.name,
-              warp: s.warpPower,
-              snippet: `${s.name} needs fuel (${s.warpPower} warp) — no refueler in fleet and no reserve on the bench. buy a probe or stock reserves (PROBEA…PROBEZ).`
-            });
-            state.lastDecisionAt.set(key, Date.now());
-          }
-        }
-      }
-    } else if (refuelerDry) {
-      // Can't rescue from an empty tanker — scrap path below handles it.
-      for (const s of rescueCandidates) {
-        const key = `refueler-dry-for:${s.name}`;
+  const claimedDonors = new Set();
+  const pickDonor = (target, mapSectors) => {
+    const candidates = ships.filter((s) =>
+      shipKind(s.name) === 'probe'
+      && s.name !== target.name
+      && !claimedDonors.has(s.name)
+      && !shipInAnyPlan(s.name)
+      && s.active !== true
+      && s.warpPower != null
+      && s.warpPower >= MIN_DONOR_WARP
+    );
+    if (candidates.length === 0) return null;
+    let best = null;
+    let bestScore = Infinity;
+    const distances = (mapSectors && mapSectors.length)
+      ? hopDistances(mapSectors, target.sector)
+      : null;
+    for (const c of candidates) {
+      // Primary score: hop distance from target to donor (BFS in known
+      // space). Unreachable/unknown: large constant so warp acts as tiebreak.
+      const hops = distances?.get?.(c.sector);
+      const score = (hops == null ? 9999 : hops) - (c.warpPower ?? 0) / 10000;
+      if (score < bestScore) { bestScore = score; best = c; }
+    }
+    if (best) claimedDonors.add(best.name);
+    return best;
+  };
+
+  if (cfg.enabled.refuel && rescueCandidates.length > 0 && ceo) {
+    // Only load the map if we have someone to rescue — avoids a DOM read
+    // every tick when the fleet is fine.
+    const mapSectors = await loadRescueMap();
+    for (const target of rescueCandidates) {
+      if (slotBudget <= 0) break;
+      const donor = pickDonor(target, mapSectors);
+      if (!donor) {
+        const key = `no-donor:${target.name}`;
         if (canAct(key, cfg.rescueCooldownSec * 1000)) {
           appendLog({
             type: 'event',
-            intelType: 'refueler-too-low',
-            ship: s.name,
-            refueler: refuelerProbe.name,
-            refuelerWarp: refuelerProbe.warpPower,
-            snippet: `${s.name} needs fuel but ${refuelerProbe.name} at ${refuelerProbe.warpPower ?? 0} warp — awaiting scrap+rebuy`
+            intelType: 'no-donor-available',
+            ship: target.name,
+            warp: target.warpPower,
+            snippet: `${target.name} needs fuel (${target.warpPower} warp) — no probe with ≥ ${MIN_DONOR_WARP} warp available to donate.`
           });
           state.lastDecisionAt.set(key, Date.now());
         }
+        continue;
       }
-    } else if (!refuelerBusy && slotBudget > 0) {
-      // One rescue per tick — refueler can only be in one sector at a time.
-      const target = rescueCandidates[0];
-      // Leave a small reserve on the refueler so it isn't left at exactly 0.
-      // Cap transfer at 400 so a single rescue doesn't drain the whole tank
-      // when only a top-up is needed.
-      const transferAmt = Math.max(100, Math.min(refuelerProbe.warpPower - 20, 400));
-      const plan = buildRefuelerRescuePlan(target, refuelerProbe, { transferAmt });
+      const transferAmt = Math.max(100, Math.min((donor.warpPower ?? 0) - 20, 400));
+      const plan = buildRefuelerRescuePlan(target, donor, { transferAmt });
       slotBudget -= 1;
       out.push({
-        key: `plan-create:refueler-rescue:${refuelerProbe.name}:${target.name}`,
-        ship: refuelerProbe.name,
+        key: `plan-create:fuel-delivery:${donor.name}:${target.name}`,
+        ship: donor.name,
         createPlan: plan,
         createsTask: true
       });
-    }
-  }
-
-  // Refueler scrap+rebuy: when the refueler's own warp falls below useful,
-  // primary remote-sells and buys a fresh Autonomous Probe. Probes come
-  // fully fueled, so the new refueler is immediately ready for dispatch.
-  // Requires the user's global naming convention to kick back in — the
-  // replace prompt asks the agent to rename the new probe to "Probe Refueler".
-  if (ceo && cfg.enabled.refuel && primaryShip && refuelerProbe) {
-    const idleAndLow = refuelerProbe.warpPower != null
-      && refuelerProbe.warpPower < REFUELER_SCRAP_WARP
-      && refuelerProbe.active === false
-      && !shipInAnyPlan(refuelerProbe.name);
-    if (idleAndLow) {
-      const primaryAtMegaport = primaryShip.sector != null && megaportSet.has(primaryShip.sector);
-      const key = `refueler-scrap:${refuelerProbe.name}`;
-      if (canAct(key, cfg.rescueCooldownSec * 1000)) {
-        const reserve = claimReserve();
-        pushInteractive({
-          key,
-          ship: primaryShip.name,
-          text: probeReplacePrompt(
-            refuelerProbe.name,
-            refuelerProbe.sector,
-            refuelerProbe.warpPower,
-            primaryAtMegaport,
-            homeHub(),
-            refuelerProbe.credits,
-            'refueler',
-            null,
-            reserve?.name || null
-          )
-        });
-      }
     }
   }
 
@@ -852,11 +823,12 @@ const decide = async (snapshot) => {
     // ship_purchase. That's the primary's current sector when it's already at
     // a megaport, otherwise the home hub the replace prompt routes it to.
     const spawnSector = primaryAtMegaport ? primaryShip.sector : homeHub();
+    // Depleted probes (any role, including former donors and used-up reserves)
+    // with warp ≤ ceiling are eligible for scrap+replace. Fresh reserves at
+    // 500 warp never match this threshold.
     const replaceCandidates = ships.filter((s) =>
       !s.primary
       && shipKind(s.name) === 'probe'
-      && probeRole(s.name) !== 'refueler'
-      && !isReserveProbe(s.name) // bench inventory is not a scrap target
       && s.warpPower != null && s.warpPower <= SCRAP_WARP_CEILING
       && s.active !== true
       && !hasPlan(s.name)
