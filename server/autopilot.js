@@ -55,14 +55,14 @@ const probeTaskPrompt = (probe, role, target, { resume = false } = {}) => {
   const where = target != null
     ? (resume ? ` — next unvisited frontier is sector ${target}` : ` starting at sector ${target}`)
     : '';
-  // Explicit per-hop loop. Prior wording ("pick the nearest unvisited
-  // neighbor") let the probe halt when its immediate neighbors were all
-  // visited — it wouldn't broaden the search to find the nearest
-  // KNOWN-UNVISITED sector elsewhere on the map. Now the loop is spelled
-  // out: widen local_map_region depth until a known-unvisited sector
-  // appears, then plot_course straight to it (the tool pathfinds through
-  // visited space automatically).
-  return `${lead} new sectors until dry${where}. at each sector, call local_map_region (widen the depth until a KNOWN-UNVISITED hex appears — not just an unvisited neighbor, any known-unvisited sector on the map) and plot_course straight to the nearest one. never halt while any known-unvisited sector remains reachable; transit through mapped territory if you have to. do not return to refuel.`
+  // At every hop: call local_map_region, enumerate every known-unvisited
+  // sector it returns, pick the one with the FEWEST hops from the probe's
+  // current position, plot_course there. If depth N finds no unvisited hex,
+  // widen and retry. This is the "starting point" decision the user wants
+  // made explicitly — don't halt at a visited pocket, don't wander toward
+  // whichever unvisited neighbor happens to be adjacent; always the
+  // minimum-hop unvisited hex on the map.
+  return `${lead} new sectors until dry${where}. at every hop: (1) call local_map_region (widen the depth until known-unvisited hexes appear), (2) from the returned sectors pick the KNOWN-UNVISITED one with the fewest hops from your current position, (3) plot_course straight to it (the pathfinder routes through visited space automatically). never halt while any known-unvisited sector remains reachable. do not return to refuel.`
     + standingOrders(probe, { isProbe: true });
 };
 
