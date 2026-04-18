@@ -266,7 +266,7 @@ export const buildProbeReplacementPlan = (deadProbe, {
 
   steps.push({
     name: 'decommission',
-    prompt: `decommission ${deadProbe.name}. sequence: 1) corporation_info → ${fetchIds}, 2) sell_ship ${deadProbe.name}, 3) ${activationStep}, 4) start_task on the new/renamed probe: explore until dry, ${startClause}. at every hop call local_map_region (widen the depth until known-unvisited hexes appear), pick the KNOWN-UNVISITED sector with the fewest hops from the probe's current position, and plot_course straight to it; never halt while any known-unvisited sector remains; never return to refuel. one action at a time, execute immediately, no confirmation.`,
+    prompt: `decommission ${deadProbe.name}. sequence: 1) corporation_info → ${fetchIds}, 2) sell_ship ${deadProbe.name}, 3) ${activationStep}, 4) start_task on the new/renamed probe: explore until dry, ${startClause}. at every hop call local_map_region with max_hops=400, pick the KNOWN-UNVISITED sector with the fewest hops from the probe's current position, and plot_course straight to it; never halt while any known-unvisited sector remains; never return to refuel. one action at a time, execute immediately, no confirmation.`,
     nagMs: 90_000,
     maxMs: 8 * 60_000,
     isDone: (snap) => {

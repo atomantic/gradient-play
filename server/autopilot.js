@@ -62,7 +62,7 @@ const probeTaskPrompt = (probe, role, target, { resume = false } = {}) => {
   // made explicitly — don't halt at a visited pocket, don't wander toward
   // whichever unvisited neighbor happens to be adjacent; always the
   // minimum-hop unvisited hex on the map.
-  return `${lead} new sectors until dry${where}. at every hop: (1) call local_map_region (widen the depth until known-unvisited hexes appear), (2) from the returned sectors pick the KNOWN-UNVISITED one with the fewest hops from your current position, (3) plot_course straight to it (the pathfinder routes through visited space automatically). never halt while any known-unvisited sector remains reachable. do not return to refuel.`
+  return `${lead} new sectors until dry${where}. at every hop: (1) call local_map_region with max_hops=400, (2) from the returned sectors pick the KNOWN-UNVISITED one with the fewest hops from your current position, (3) plot_course straight to it (the pathfinder routes through visited space automatically). never halt while any known-unvisited sector remains reachable. do not return to refuel.`
     + standingOrders(probe, { isProbe: true });
 };
 
