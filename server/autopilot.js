@@ -431,7 +431,7 @@ const shortProbeName = (probe, allShips = []) => {
  * Fires as a one-shot interactive prompt; agent resolves the ship_id via
  * corporation_info() and handles the purchase.
  */
-const probeReplacePrompt = (probeName, probeSector, probeWarp, primaryAtMegaport, hubSector, probeCredits, role = 'explorer') => {
+const probeReplacePrompt = (probeName, probeSector, probeWarp, primaryAtMegaport, hubSector, probeCredits, role = 'explorer', frontierSector = null) => {
   const loc = probeSector != null ? `@${probeSector}` : 'unknown sector';
   // REMOTE SELL: sell_ship only checks the CALLER's (primary's) sector, not the
   // target ship's sector. The probe stays put — it has 0 warp and cannot move
@@ -448,9 +448,12 @@ const probeReplacePrompt = (probeName, probeSector, probeWarp, primaryAtMegaport
   // continues to recognize it as the designated fuel tanker, then park it
   // idle — refuelers wait for rescue dispatches, they do not run autonomous
   // tasks of their own.
+  const explorerStart = frontierSector != null
+    ? `starting at sector ${frontierSector} (server pre-computed nearest unvisited frontier via map BFS — skip re-exploring known dead-ends)`
+    : `first call local_map_region to find the nearest unvisited sector from your current position and start there — do not wander through already-explored space testing known dead-ends`;
   const finalStep = role === 'refueler'
     ? `4) rename_ship the new probe to "Probe Refueler" (short, no date suffix) so autopilot keeps tracking it as the fuel tanker. 5) DO NOT start_task — the refueler stands by until a fleetmate needs warp.`
-    : `4) rename_ship the new probe to "Probe Explorer" (short, no date suffix, max ~22 chars) so it's easy to distinguish from other probes. 5) start_task to dispatch the fresh probe on exploration.`;
+    : `4) rename_ship the new probe to "Probe Explorer" (short, no date suffix, max ~22 chars) so it's easy to distinguish from other probes. 5) start_task on the new probe to explore new sectors until it runs out of fuel, ${explorerStart}. use local_map_region each hop to pick the nearest unvisited neighbor; if all neighbors are known, transit through known space to reach fresh territory — do not halt at visited dead-ends. do not turn back to refuel.`;
   return `${probeName} is stranded ${loc} at ${probeWarp ?? 0} warp — recycle it via REMOTE SELL. DO NOT move ${probeName}; it has no warp and cannot travel. sell_ship only checks the primary's sector, so the primary calls it remotely on ${probeName}.${creditsNote} ${travel} sequence (primary performs all steps): 1) corporation_info to fetch ${probeName}'s ship_id. 2) sell_ship(ship_id=<${probeName}'s hex prefix>) — refund covers hull (~1000 cr) + any credits ${probeName} was holding. 3) ship_purchase a new Autonomous Probe. ${finalStep} one action at a time, execute immediately, no confirmation.`;
 };
 
@@ -809,22 +812,43 @@ const decide = async (snapshot) => {
   if (ceo && cfg.enabled.refuel && primaryShip) {
     const SCRAP_WARP_CEILING = 10;
     const primaryAtMegaport = primaryShip.sector != null && megaportSet.has(primaryShip.sector);
-    for (const s of ships) {
-      if (s.primary) continue;
-      if (shipKind(s.name) !== 'probe') continue;
-      if (probeRole(s.name) === 'refueler') continue;
-      if (s.warpPower == null || s.warpPower > SCRAP_WARP_CEILING) continue;
-      if (s.active === true) continue; // still executing a task — wait for it to end
-      if (hasPlan(s.name)) continue;
-      // sell_ship refunds both the hull value AND any credits the probe is
-      // holding, so salvage funds are recovered automatically by the sell.
-      // The replace prompt flags the credit amount for visibility.
+    // New probe spawns wherever the primary is docked when it calls
+    // ship_purchase. That's the primary's current sector when it's already at
+    // a megaport, otherwise the home hub the replace prompt routes it to.
+    const spawnSector = primaryAtMegaport ? primaryShip.sector : homeHub();
+    const replaceCandidates = ships.filter((s) =>
+      !s.primary
+      && shipKind(s.name) === 'probe'
+      && probeRole(s.name) !== 'refueler'
+      && s.warpPower != null && s.warpPower <= SCRAP_WARP_CEILING
+      && s.active !== true
+      && !hasPlan(s.name)
+    );
+    // Pre-compute the nearest unvisited frontier from the spawn sector so the
+    // new probe doesn't waste hops wandering back through explored space.
+    // BFS caches assigned frontiers tick-wide so multiple scrap+rebuys don't
+    // all route to the same hex.
+    let replacementMap = null;
+    if (replaceCandidates.length > 0) {
+      const map = await getMapSectors().catch(() => null);
+      if (map?.ok) replacementMap = map.sectors;
+    }
+    const replacementFrontiers = new Set();
+    for (const s of replaceCandidates) {
       const key = `probe-replace:${s.name}`;
       if (!canAct(key, cfg.rescueCooldownSec * 1000)) continue;
+      let frontierSector = null;
+      if (replacementMap && spawnSector != null) {
+        const f = findNearestFrontier(replacementMap, spawnSector, replacementFrontiers);
+        if (f) {
+          frontierSector = f.sector;
+          replacementFrontiers.add(f.sector);
+        }
+      }
       pushInteractive({
         key,
         ship: primaryShip.name,
-        text: probeReplacePrompt(s.name, s.sector, s.warpPower, primaryAtMegaport, homeHub(), s.credits)
+        text: probeReplacePrompt(s.name, s.sector, s.warpPower, primaryAtMegaport, homeHub(), s.credits, 'explorer', frontierSector)
       });
     }
   }
