@@ -184,13 +184,24 @@ export const buildRefuelerRescuePlan = (target, donor, { transferAmt = 300 } = {
       const t = byName.find((s) => s.name === targetName);
       const d = byName.find((s) => s.name === donorName);
       // Donor is out of warp — whatever it had is spent (either on the
-      // plot_course leg or an already-completed transfer). No point nagging
-      // a transfer_warp_power it can't fulfil; end the plan and let the
-      // regular scrap loop recycle the empty probe.
+      // plot_course leg or an already-completed transfer). No point
+      // nagging a transfer the donor can't fulfil.
       if (d && d.warpPower != null && d.warpPower <= 10) return true;
+      // Donor's warp dropped meaningfully from baseline: a transfer landed,
+      // regardless of whether the target's warp gauge has refreshed yet. This
+      // catches the case where the target was already near-full and only a
+      // sliver was added ("SAME HAULER received 20 warp since it's now full
+      // at 500/500").
+      const donorBefore = plan.context.donorWarpBefore ?? null;
+      if (d && d.warpPower != null && donorBefore != null && d.warpPower <= donorBefore - 20) return true;
       if (!t || t.warpPower == null) return false;
+      // Target already at/near its hull max — can't accept more warp.
+      const targetMax = t.warpMax ?? 500;
+      if (t.warpPower >= targetMax - 20) return true;
       const baseline = plan.context.targetWarpBefore ?? 0;
-      return t.warpPower >= baseline + Math.floor(transferAmt * 0.5);
+      // Any detectable positive delta on the target is enough — the agent
+      // already did the work, the UI just hasn't settled.
+      return t.warpPower > baseline + 10;
     }
   }];
 
@@ -203,6 +214,7 @@ export const buildRefuelerRescuePlan = (target, donor, { transferAmt = 300 } = {
       donor: donorName,
       transferAmt,
       targetWarpBefore: target.warpPower ?? 0,
+      donorWarpBefore: donor.warpPower ?? 0,
       blockedShips: [targetName]
     }
   });
