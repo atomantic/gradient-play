@@ -49,22 +49,22 @@ const standingOrders = (shipName = '', { isProbe = false, creditKeep = 1000, tra
 // now" with no reference to the task system at all.
 const interactiveOnlyClause = () => ' [execute immediately, no confirmation]';
 
-const probeTaskPrompt = (probe, role, target) => {
+const probeTaskPrompt = (probe, role, target, { resume = false } = {}) => {
   const verb = role === 'scavenger' ? 'salvaging' : 'exploring';
+  // "resume" semantics when the probe is already in the field — it's mid-
+  // mission (idle because the game capped its task at 100 steps), just tell
+  // it to continue from where it stands instead of re-routing home first.
+  const lead = resume ? `continue ${probe} ${verb}` : `send ${probe} as far as it can go ${verb}`;
   const where = target != null
-    ? ` starting at sector ${target}`
+    ? (resume ? ` — next unvisited frontier is sector ${target}` : ` starting at sector ${target}`)
     : '';
-  // Nudge the agent toward the right discovery tool. local_map_region(depth=3)
-  // returns the adjacent unvisited sectors; without this reminder the agent
-  // sometimes wanders via plot_course + my_status guesswork and re-visits
-  // known hexes.
-  return `send ${probe} as far as it can go ${verb} new sectors until it runs out of fuel${where}. use local_map_region each hop to pick the nearest unvisited neighbor. prefer unvisited hops; if all neighbors are already known, transit through known sectors to reach fresh territory — do not halt just because the immediate neighbors are visited. do not turn back to refuel — the primary will remote-sell it when the run is over.`
+  return `${lead} new sectors until it runs out of fuel${where}. use local_map_region each hop to pick the nearest unvisited neighbor. prefer unvisited hops; if all neighbors are already known, transit through known sectors to reach fresh territory — do not halt just because the immediate neighbors are visited. do not turn back to refuel — the primary will remote-sell it when the run is over.`
     + standingOrders(probe, { isProbe: true });
 };
 
-const probeExplorePrompt = (probe, target) => probeTaskPrompt(probe, 'explorer', target);
-const scavengerPrompt = (scav, target) => probeTaskPrompt(scav, 'scavenger', target);
-const explorerPrompt = (expl, target) => probeTaskPrompt(expl, 'explorer', target);
+const probeExplorePrompt = (probe, target, opts) => probeTaskPrompt(probe, 'explorer', target, opts);
+const scavengerPrompt = (scav, target, opts) => probeTaskPrompt(scav, 'scavenger', target, opts);
+const explorerPrompt = (expl, target, opts) => probeTaskPrompt(expl, 'explorer', target, opts);
 
 const haulerTradePrompt = (hauler) => {
   const route = state.config?.haulerPreferredRoute;
@@ -984,7 +984,19 @@ const decide = async (snapshot) => {
     s.sector === homeHub() &&
     !hasPlan(s.name);
 
-  for (const probe of explorerIdleProbes) {
+  // Prioritise probes already deployed in the field — they're mid-mission
+  // (idle because the game capped the task at 100 steps or the agent paused)
+  // and have a known frontier position. Resume them before reaching for
+  // anything sitting at a megaport/hub, so we don't waste warp on a new
+  // outbound leg when a probe is already parked near the frontier.
+  const isInField = (s) => s.sector != null && !megaportSet.has(s.sector);
+  const fieldProbes = explorerIdleProbes.filter(isInField)
+    .sort((a, b) => (b.warpPower || 0) - (a.warpPower || 0));
+  const hubProbes = explorerIdleProbes.filter((s) => !isInField(s))
+    .sort((a, b) => (b.warpPower || 0) - (a.warpPower || 0));
+  const orderedProbes = [...fieldProbes, ...hubProbes];
+
+  for (const probe of orderedProbes) {
     if (skipCorpWork) break;
     if (probesSent >= probeTarget) break;
     if (remainingSlots <= 0) break;
@@ -1009,11 +1021,15 @@ const decide = async (snapshot) => {
       if (frontier) assignedFrontiers.add(frontier.sector);
     }
     const target = frontier?.sector ?? null;
+    const resume = isInField(probe);
     let text;
-    if (role === 'explorer') text = explorerPrompt(probe.name, target);
-    else if (role === 'scavenger') text = scavengerPrompt(probe.name, target);
-    else text = probeExplorePrompt(probe.name, target);
+    if (role === 'explorer') text = explorerPrompt(probe.name, target, { resume });
+    else if (role === 'scavenger') text = scavengerPrompt(probe.name, target, { resume });
+    else text = probeExplorePrompt(probe.name, target, { resume });
     if (pushTaskDecision({ key, ship: probe.name, text })) {
+      if (resume) {
+        appendLog({ type: 'event', intelType: 'probe-resume', ship: probe.name, sector: probe.sector, warp: probe.warpPower, frontier: target });
+      }
       remainingSlots -= 1;
       probesSent += 1;
     }
