@@ -51,14 +51,18 @@ const interactiveOnlyClause = () => ' [execute immediately, no confirmation]';
 
 const probeTaskPrompt = (probe, role, target, { resume = false } = {}) => {
   const verb = role === 'scavenger' ? 'salvaging' : 'exploring';
-  // "resume" semantics when the probe is already in the field — it's mid-
-  // mission (idle because the game capped its task at 100 steps), just tell
-  // it to continue from where it stands instead of re-routing home first.
   const lead = resume ? `continue ${probe} ${verb}` : `send ${probe} as far as it can go ${verb}`;
   const where = target != null
     ? (resume ? ` — next unvisited frontier is sector ${target}` : ` starting at sector ${target}`)
     : '';
-  return `${lead} new sectors until it runs out of fuel${where}. use local_map_region each hop to pick the nearest unvisited neighbor. prefer unvisited hops; if all neighbors are already known, transit through known sectors to reach fresh territory — do not halt just because the immediate neighbors are visited. do not turn back to refuel — the primary will remote-sell it when the run is over.`
+  // Explicit per-hop loop. Prior wording ("pick the nearest unvisited
+  // neighbor") let the probe halt when its immediate neighbors were all
+  // visited — it wouldn't broaden the search to find the nearest
+  // KNOWN-UNVISITED sector elsewhere on the map. Now the loop is spelled
+  // out: widen local_map_region depth until a known-unvisited sector
+  // appears, then plot_course straight to it (the tool pathfinds through
+  // visited space automatically).
+  return `${lead} new sectors until dry${where}. at each sector, call local_map_region (widen the depth until a KNOWN-UNVISITED hex appears — not just an unvisited neighbor, any known-unvisited sector on the map) and plot_course straight to the nearest one. never halt while any known-unvisited sector remains reachable; transit through mapped territory if you have to. do not return to refuel.`
     + standingOrders(probe, { isProbe: true });
 };
 

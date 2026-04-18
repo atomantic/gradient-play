@@ -241,16 +241,16 @@ export const buildProbeReplacementPlan = (deadProbe, {
   const activationStep = reserveName
     ? `rename "${reserveName}" to a short name`
     : `ship_purchase Autonomous Probe and give it a short name (no date suffix)`;
-  const exploreDirective = frontierSector != null
-    ? `from sector ${frontierSector}`
-    : `from the nearest unvisited sector (use local_map_region)`;
+  const startClause = frontierSector != null
+    ? `starting at sector ${frontierSector}`
+    : `starting at the nearest known-unvisited sector`;
   const fetchIds = reserveName
     ? `ship_ids for "${deadProbe.name}" and "${reserveName}"`
     : `ship_id for "${deadProbe.name}"`;
 
   steps.push({
     name: 'decommission',
-    prompt: `decommission ${deadProbe.name}. sequence: 1) corporation_info → ${fetchIds}, 2) sell_ship ${deadProbe.name}, 3) ${activationStep}, 4) start_task: explore ${exploreDirective}, never retreat to refuel. one action at a time, execute immediately, no confirmation.`,
+    prompt: `decommission ${deadProbe.name}. sequence: 1) corporation_info → ${fetchIds}, 2) sell_ship ${deadProbe.name}, 3) ${activationStep}, 4) start_task on the new/renamed probe: explore until dry, ${startClause}. at each sector widen local_map_region until a KNOWN-UNVISITED hex appears and plot_course there; never halt while any known-unvisited sector remains; never return to refuel. one action at a time, execute immediately, no confirmation.`,
     nagMs: 90_000,
     maxMs: 8 * 60_000,
     isDone: (snap) => {
