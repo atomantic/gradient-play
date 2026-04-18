@@ -22,21 +22,26 @@ const homeHub = () => state.config?.homeHub ?? DEFAULTS.homeHub;
  * Compact standing-orders suffix. All policy in one short bracket so the game
  * chat input doesn't truncate the core task instruction.
  */
-const standingOrders = (shipName = '', { isProbe = false, creditKeep = 1000, tradeFallback = false } = {}) => {
+const standingOrders = (shipName = '', { isProbe = false, tradeFallback = false } = {}) => {
   const cfg = state.config || {};
   const parts = [];
   if (cfg.safeMode && !isProbe) {
-    // For trade dispatches, allow a small excursion outside fedspace when no
-    // fedspace port will buy the cargo — otherwise the hauler cycles through
-    // full/sated fedspace buyers forever. Hard fedspace stays the default for
-    // everything else (rescues, upgrades, bank sweeps).
     parts.push(tradeFallback
       ? `fedspace first; +1-2 border hops OK only if no fedspace buyer accepts the cargo; keep warp to return to a megaport (${megaportList()})`
       : 'fedspace');
   }
   parts.push('avoid tolls');
-  if (isProbe) parts.push('bank all credits');
-  else if (creditKeep > 0) parts.push(`bank >${creditKeep}`);
+  if (isProbe) {
+    parts.push('bank all credits');
+  } else {
+    // Bank threshold comes from cfg.onHandFloor + cfg.depositExcessOver.
+    // Keep onHandFloor as the working float; only bank once on-hand exceeds
+    // floor+excess, then drain back down to the floor.
+    const floor = cfg.onHandFloor ?? 10000;
+    const excessOver = cfg.depositExcessOver ?? 10000;
+    const trigger = floor + excessOver;
+    parts.push(`bank only if onhand >${trigger}, keep ${floor}`);
+  }
   parts.push('execute now');
   return ` [${parts.join('; ')}]`;
 };
@@ -121,18 +126,11 @@ const upgradePrompt = (shipName, total, next) => pick([
   `swap ${shipName} → ${next.name} next megaport` + interactiveOnlyClause()
 ]);
 
-const primaryTradePrompt = (primary) => {
-  const route = state.config?.primaryPreferredRoute;
-  if (route?.buyAt != null && route?.sellAt != null && route?.commodity) {
-    const note = route.note ? ` ${route.note}.` : '';
-    return `${primary}: PREFERRED ROUTE — buy ${route.commodity} at sector ${route.buyAt}, sell at sector ${route.sellAt}, repeat.${note} if stock depletes below profitability, pick any other fedspace trade.` + standingOrders(primary);
-  }
-  return pick([
-    `${primary}: trade in fedspace, route is your call.`,
-    `${primary}: start trading in fedspace — pick whatever route looks best.`,
-    `${primary}: fedspace trade run, your choice of ports.`
-  ]) + standingOrders(primary);
-};
+const primaryTradePrompt = (primary) => pick([
+  `${primary}: trade in fedspace, route is your call.`,
+  `${primary}: start trading in fedspace — pick whatever route looks best.`,
+  `${primary}: fedspace trade run, your choice of ports.`
+]) + standingOrders(primary);
 
 /**
  * Reckless frontier mode for the primary ship. Leaves fedspace, hunts
@@ -193,8 +191,8 @@ const DEFAULTS = {
   // on-hand that a buy doesn't strand the ship at zero credits. Override
   // per-account via data/config.json if you're flying a bigger hull.
   shipFundingFloor: 5000,         // minimum credits a ship should have before dispatch — seed from primary if below. 5k covers a full Wayfarer/Atlas QF buy with headroom.
-  onHandFloor: 5000,              // working float to keep on-hand on every ship (covers a single ~1500 cr trade plus buffer)
-  depositExcessOver: 20000,       // trigger sweep when on-hand is floor+this (so 25k → deposit 20k, leave 5k)
+  onHandFloor: 10000,             // keep this much on hand at all times; banking never drops below
+  depositExcessOver: 10000,       // only bank once on-hand exceeds floor+this (so 20k trigger, drain back to 10k)
   decisionCooldownSec: 420,       // 7 min — longer than a typical refuel or task handoff
   considerUpgrades: true,
   upgradeCreditsThreshold: 100000,
@@ -202,14 +200,11 @@ const DEFAULTS = {
   probeSlots: 2,                   // 2 probes for map expansion (explorer/scavenger) — refueler doesn't count
   tradeSlots: 1,                   // 1 corp hauler on a fedspace trade loop; fleet prioritises exploration
   primaryDispatchCooldownSec: 300,  // 5 min — tight enough to refill the local slot quickly when a task ends
-  // Optional: override the primary's generic fedspace dispatch with a
-  // specific arbitrage route. Shape: { buyAt, sellAt, commodity, note }.
-  // Corp haulers are intentionally non-prescriptive (they pick their own
-  // routes) so `haulerPreferredRoute` is no longer honored and is kept only
-  // as a deprecated placeholder so older data/config.json files don't fail
-  // validation on load.
-  primaryPreferredRoute: null,
-  haulerPreferredRoute: null, // deprecated — ignored
+  // Both preferred-route overrides are deprecated — all trade prompts
+  // (primary and corp haulers) are non-prescriptive now. Kept in DEFAULTS
+  // so older data/config.json files don't fail validation.
+  primaryPreferredRoute: null, // deprecated — ignored
+  haulerPreferredRoute: null,  // deprecated — ignored
   megaports: [305, 472, 1413],      // known mega-port sectors — add more as probes discover them
   homeHub: 1413,                    // preferred dock for fuel/banking — the fleet's home base
   shortenProbeNames: true,          // auto-rename probes whose name exceeds probeNameMaxChars
