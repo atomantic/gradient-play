@@ -167,10 +167,16 @@ export const buildRefuelerRescuePlan = (target, donor, { transferAmt = 300 } = {
   const targetName = target.name;
   const donorName = donor.name;
   const targetSector = target.sector;
+  // Only include the sector hint when we actually know it — if the DOM
+  // scrape couldn't read the primary's sector, the agent can resolve the
+  // location itself (corporation_info / my_status). Baking "@null" into
+  // the prompt was causing the agent to refuse the command and ask us
+  // where the ship is.
+  const locHint = targetSector != null ? ` @${targetSector}` : '';
 
   const steps = [{
     name: 'fuel-delivery',
-    prompt: `${donorName}: refuel ${targetName} @${targetSector} — plot_course, transfer_warp_power ${transferAmt}. execute now.`,
+    prompt: `${donorName}: refuel ${targetName}${locHint} — plot_course, transfer_warp_power ${transferAmt}. execute now.`,
     nagMs: 90_000,
     maxMs: 10 * 60_000,
     isDone: (snap, _ship, plan) => {
