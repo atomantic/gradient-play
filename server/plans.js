@@ -241,16 +241,25 @@ export const buildProbeReplacementPlan = (deadProbe, {
 
   steps.push({
     name: 'route-primary-to-hub',
-    prompt: `${primaryName}: plot_course to sector ${hubSector} (megaport) and dock — sell_ship requires a megaport. interrupt trade if needed. one action, execute immediately, no confirmation.`,
+    prompt: `${primaryName}: plot_course to sector ${hubSector} and dock. interrupt trade if needed. one action, execute immediately, no confirmation.`,
     nagMs: 120_000,
     maxMs: 8 * 60_000,
-    // As long as the primary's sector reads as a megaport, we're good to
-    // proceed. Requiring active===false was causing a nag loop when the
-    // primary was docked at the hub but still marked active (e.g. a trade
-    // task just finished), or when the DOM's active flag briefly flickered.
     isDone: (snap) => {
       const p = (snap?.extracted?.ships || []).find((s) => s.name === primaryName);
-      return !!(p && p.sector != null && megaportSet.has(p.sector));
+      if (p && p.sector != null && megaportSet.has(p.sector)) return true;
+      // DOM sector scrape is fragile (relies on a movement-history row that's
+      // sometimes absent). Fall back to the chat: if the agent has recently
+      // reported it's docked at the hub, treat the step as done so we stop
+      // firing "plot_course to 1413" at a ship that's already there.
+      const msgs = snap?.extracted?.lastMessages || [];
+      const recent = msgs.slice(-6).join(' ').toLowerCase();
+      const hubStr = String(hubSector);
+      const dockedAtHub = new RegExp(
+        `(?:already\\s+docked|docked\\s+(?:at|in)|at\\s+(?:sector\\s+)?${hubStr}\\b|already\\s+at\\s+(?:sector\\s+)?${hubStr}\\b)`,
+        'i'
+      );
+      if (dockedAtHub.test(recent) && recent.includes(hubStr)) return true;
+      return false;
     }
   });
 
