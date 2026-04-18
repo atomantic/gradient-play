@@ -103,11 +103,14 @@ const bankSweepPrompt = (primary, excess, onHand, floor) => pick([
  * leaving the hub without enough credits can't afford to refuel at other
  * ports or make opening trades.
  */
-const shipFundPrompt = (ship, credits, needed) => pick([
-  `${ship} has only ${credits} credits — transfer ${needed} from primary (or bank_withdraw) before dispatch` + interactiveOnlyClause(),
-  `seed ${ship} with ${needed} credits from primary before it leaves hub (currently ${credits})` + interactiveOnlyClause(),
-  `${ship}: ${credits} credits, needs ${needed} for operations. transfer from primary, then dispatch` + interactiveOnlyClause()
-]);
+const shipFundPrompt = (ship, credits, floor) => {
+  const delta = Math.max(0, floor - (credits ?? 0));
+  return pick([
+    `${ship}: ${credits} credits — transfer ${delta} from primary (bank_withdraw if needed) to reach ${floor}` + interactiveOnlyClause(),
+    `seed ${ship} to ${floor} credits (currently ${credits}) — transfer ${delta} from primary before dispatch` + interactiveOnlyClause(),
+    `${ship} at ${credits}, target ${floor}. transfer ${delta} from primary, then dispatch` + interactiveOnlyClause()
+  ]);
+};
 
 const shipSweepPrompt = (ship, credits, excess, keep) => pick([
   `${ship}: ${credits} credits — rendezvous with primary at hub ${homeHub()}, transfer ${excess}, primary banks it, keep ${keep}` + interactiveOnlyClause(),
@@ -192,7 +195,7 @@ const DEFAULTS = {
   // 3-5k cr; even on a Kestrel a primary trade costs ~1500. Keep enough
   // on-hand that a buy doesn't strand the ship at zero credits. Override
   // per-account via data/config.json if you're flying a bigger hull.
-  shipFundingFloor: 3000,         // minimum credits a ship should have before dispatch — seed from primary if below
+  shipFundingFloor: 5000,         // minimum credits a ship should have before dispatch — seed from primary if below. 5k covers a full Wayfarer/Atlas QF buy with headroom.
   onHandFloor: 5000,              // working float to keep on-hand on every ship (covers a single ~1500 cr trade plus buffer)
   depositExcessOver: 20000,       // trigger sweep when on-hand is floor+this (so 25k → deposit 20k, leave 5k)
   decisionCooldownSec: 420,       // 7 min — longer than a typical refuel or task handoff
