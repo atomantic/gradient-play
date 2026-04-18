@@ -436,8 +436,16 @@ const hopDistances = (sectors, fromSectorId) => {
 };
 
 /**
- * BFS through visited known sectors from `fromSectorId`, returning the nearest
- * unvisited sector (or an unknown adjacent sector) as the frontier target.
+ * Pick the best frontier sector — an UNVISITED hex adjacent to a visited one —
+ * to send a probe through. Scans every reachable frontier by BFS'ing through
+ * visited space, then scores each candidate by how many of its neighbors are
+ * ALREADY visited. A frontier bordered by 5 visited hexes is a pocket / dead-
+ * end; a frontier bordered by only 1 is an outward edge of the known map and
+ * is the highest-value exploration target.
+ *
+ * Score primary: visited-neighbor count (lower is better — points outward).
+ * Tiebreaker: hop distance from origin (closer is cheaper to reach).
+ *
  * `excludeIds` prevents assigning the same frontier to two probes in one tick.
  * Returns null if no frontier is reachable through known space.
  */
@@ -445,25 +453,55 @@ export const findNearestFrontier = (sectors, fromSectorId, excludeIds = new Set(
   if (!Array.isArray(sectors) || fromSectorId == null) return null;
   const by = new Map(sectors.map((s) => [s.id, s]));
   if (!by.has(fromSectorId)) return null;
-  const dist = new Map([[fromSectorId, 0]]);
+
+  // BFS over visited sectors; collect unvisited neighbors along the way.
+  const visitedDist = new Map([[fromSectorId, 0]]);
   const queue = [fromSectorId];
+  const frontier = new Map(); // unvisitedId → { distance, visitedNeighbors }
+
   while (queue.length) {
     const cur = queue.shift();
-    const curDist = dist.get(cur);
+    const curDist = visitedDist.get(cur);
     const node = by.get(cur);
     if (!node) continue;
     for (const nb of node.adj || []) {
-      if (dist.has(nb)) continue;
-      if (excludeIds.has(nb)) { dist.set(nb, curDist + 1); continue; }
       const nbNode = by.get(nb);
-      if (!nbNode || !nbNode.visited) {
-        return { sector: nb, hops: curDist + 1 };
+      if (nbNode?.visited) {
+        if (!visitedDist.has(nb)) {
+          visitedDist.set(nb, curDist + 1);
+          queue.push(nb);
+        }
+        continue;
       }
-      dist.set(nb, curDist + 1);
-      queue.push(nb);
+      if (excludeIds.has(nb)) continue;
+      // Unvisited frontier. Record the first time we see it and keep the
+      // minimum distance; count how many visited sectors border it.
+      const existing = frontier.get(nb);
+      if (existing) {
+        existing.visitedNeighbors += 1;
+        if (curDist + 1 < existing.distance) existing.distance = curDist + 1;
+      } else {
+        frontier.set(nb, { distance: curDist + 1, visitedNeighbors: 1 });
+      }
     }
   }
-  return null;
+
+  if (frontier.size === 0) return null;
+
+  // Score: visited-neighbor count dominates (outward-pointing), distance
+  // breaks ties. The * 1000 ensures a frontier with 1 visited neighbor at
+  // 50 hops beats one with 2 visited neighbors at 1 hop — we'd rather
+  // travel further than dead-end in a pocket.
+  let best = null;
+  let bestScore = Infinity;
+  for (const [id, info] of frontier) {
+    const score = info.visitedNeighbors * 1000 + info.distance;
+    if (score < bestScore) {
+      bestScore = score;
+      best = { sector: id, hops: info.distance, visitedNeighbors: info.visitedNeighbors };
+    }
+  }
+  return best;
 };
 
 // Next upgrade tier by current ship class, from strategy.md.
