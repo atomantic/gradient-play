@@ -202,6 +202,65 @@ export const buildRefuelerRescuePlan = (target, donor, { transferAmt = 300 } = {
   });
 };
 
+/**
+ * Probe-replacement plan: the primary decommissions a dead probe and
+ * activates a reserve (or buys a new hull) as its replacement. sell_ship
+ * only works from a megaport, so step 1 routes the primary there first —
+ * formerly this was a single sub-clause in a one-shot prompt and the agent
+ * sometimes tried to sell before docking. The route step auto-skips when
+ * the primary is already at a megaport.
+ */
+export const buildProbeReplacementPlan = (deadProbe, {
+  primary,
+  hubSector = 1413,
+  megaports = [305, 472, 1413],
+  reserveName = null,
+  frontierSector = null
+} = {}) => {
+  const megaportSet = new Set(megaports);
+  const primaryName = primary.name;
+  const steps = [];
+
+  steps.push({
+    name: 'route-primary-to-hub',
+    prompt: `${primaryName}: plot_course to sector ${hubSector} (megaport) and dock — sell_ship requires a megaport. interrupt trade if needed. one action, execute immediately, no confirmation.`,
+    nagMs: 120_000,
+    maxMs: 8 * 60_000,
+    isDone: (snap) => {
+      const p = (snap?.extracted?.ships || []).find((s) => s.name === primaryName);
+      return !!(p && p.sector != null && megaportSet.has(p.sector) && p.active === false);
+    }
+  });
+
+  const activationStep = reserveName
+    ? `rename "${reserveName}" to a short name`
+    : `ship_purchase Autonomous Probe and give it a short name (no date suffix)`;
+  const exploreDirective = frontierSector != null
+    ? `from sector ${frontierSector}`
+    : `from the nearest unvisited sector (use local_map_region)`;
+  const fetchIds = reserveName
+    ? `ship_ids for "${deadProbe.name}" and "${reserveName}"`
+    : `ship_id for "${deadProbe.name}"`;
+
+  steps.push({
+    name: 'decommission',
+    prompt: `decommission ${deadProbe.name}. sequence: 1) corporation_info → ${fetchIds}, 2) sell_ship ${deadProbe.name}, 3) ${activationStep}, 4) start_task: explore ${exploreDirective}, never retreat to refuel. one action at a time, execute immediately, no confirmation.`,
+    nagMs: 90_000,
+    maxMs: 8 * 60_000,
+    isDone: (snap) => {
+      const stillThere = (snap?.extracted?.ships || []).some((s) => s.name === deadProbe.name);
+      return !stillThere;
+    }
+  });
+
+  return newPlan({
+    ship: primaryName,
+    goal: 'probe-replace',
+    steps,
+    context: { deadProbe: deadProbe.name, reserveName, blockedShips: [deadProbe.name] }
+  });
+};
+
 // ── Fleet-wide rally plan ────────────────────────────────────────────
 // Sentinel key: plans.set('__fleet__', plan). processPlans detects this
 // and passes ship=null to isDone (steps use the full snapshot instead).

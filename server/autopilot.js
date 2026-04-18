@@ -1,6 +1,6 @@
 import { getGameSnapshot, sendAssistantPrompt, clickGameReconnect, loginIfNeeded, getMapSectors } from './cdp.js';
 import { observe as intelObserve } from './intel.js';
-import { buildRefuelerRescuePlan, buildFleetRallyPlan, FLEET_PLAN_KEY, currentStepOf, isComplete, advance } from './plans.js';
+import { buildRefuelerRescuePlan, buildProbeReplacementPlan, buildFleetRallyPlan, FLEET_PLAN_KEY, currentStepOf, isComplete, advance } from './plans.js';
 
 const pick = (arr) => arr[Math.floor(Math.random() * arr.length)];
 
@@ -433,29 +433,6 @@ const hopDistances = (sectors, fromSectorId) => {
 };
 
 /**
- * Remote-sell a stranded probe and replace it with a fresh one. strategy.md
- * §7: sell_ship only checks the caller's personal-ship location (megaport in
- * fedspace), not the probe's sector. Stranded probes at 0 warp deep in neutral
- * space can be sold remotely — the refund covers a new probe's full cost.
- * Fires as a one-shot interactive prompt; agent resolves the ship_id via
- * corporation_info() and handles the purchase.
- */
-const probeReplacePrompt = (probeName, _probeSector, _probeWarp, primaryAtMegaport, hubSector, _probeCredits, _role = 'explorer', frontierSector = null, reserveName = null) => {
-  const travel = primaryAtMegaport ? '' : ` primary plot_course to sector ${hubSector} first.`;
-  const activationStep = reserveName
-    ? `rename "${reserveName}" to a short name`
-    : `ship_purchase Autonomous Probe and give it a short name (no date suffix)`;
-  const exploreDirective = frontierSector != null
-    ? `from sector ${frontierSector}`
-    : `from the nearest unvisited sector (use local_map_region)`;
-  const dispatchStep = `start_task: explore ${exploreDirective}, never retreat to refuel`;
-  const fetchIds = reserveName
-    ? `ship_ids for "${probeName}" and "${reserveName}"`
-    : `ship_id for "${probeName}"`;
-  return `decommission ${probeName}.${travel} sequence: 1) corporation_info → ${fetchIds}, 2) sell_ship ${probeName}, 3) ${activationStep}, 4) ${dispatchStep}. one action at a time, execute immediately, no confirmation.`;
-};
-
-/**
  * BFS through visited known sectors from `fromSectorId`, returning the nearest
  * unvisited sector (or an unknown adjacent sector) as the frontier target.
  * `excludeIds` prevents assigning the same frontier to two probes in one tick.
@@ -820,7 +797,10 @@ const decide = async (snapshot) => {
       if (map?.ok) replacementMap = map.sectors;
     }
     const replacementFrontiers = new Set();
+    // Only one probe-replace plan at a time — the primary is the executor.
+    const primaryAlreadyBusyOnReplace = shipInAnyPlan(primaryShip.name);
     for (const s of replaceCandidates) {
+      if (primaryAlreadyBusyOnReplace) break;
       const key = `probe-replace:${s.name}`;
       if (!canAct(key, cfg.rescueCooldownSec * 1000)) continue;
       let frontierSector = null;
@@ -832,11 +812,23 @@ const decide = async (snapshot) => {
         }
       }
       const reserve = claimReserve();
-      pushInteractive({
-        key,
-        ship: primaryShip.name,
-        text: probeReplacePrompt(s.name, s.sector, s.warpPower, primaryAtMegaport, homeHub(), s.credits, 'explorer', frontierSector, reserve?.name || null)
+      const plan = buildProbeReplacementPlan(s, {
+        primary: primaryShip,
+        hubSector: homeHub(),
+        megaports: megaportSectors(),
+        reserveName: reserve?.name || null,
+        frontierSector
       });
+      if (slotBudget > 0) {
+        slotBudget -= 1;
+        out.push({
+          key: `plan-create:probe-replace:${s.name}`,
+          ship: primaryShip.name,
+          createPlan: plan,
+          createsTask: true
+        });
+        break; // one replace plan per tick; primary can only route once
+      }
     }
   }
 
