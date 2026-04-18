@@ -244,9 +244,13 @@ export const buildProbeReplacementPlan = (deadProbe, {
     prompt: `${primaryName}: plot_course to sector ${hubSector} (megaport) and dock — sell_ship requires a megaport. interrupt trade if needed. one action, execute immediately, no confirmation.`,
     nagMs: 120_000,
     maxMs: 8 * 60_000,
+    // As long as the primary's sector reads as a megaport, we're good to
+    // proceed. Requiring active===false was causing a nag loop when the
+    // primary was docked at the hub but still marked active (e.g. a trade
+    // task just finished), or when the DOM's active flag briefly flickered.
     isDone: (snap) => {
       const p = (snap?.extracted?.ships || []).find((s) => s.name === primaryName);
-      return !!(p && p.sector != null && megaportSet.has(p.sector) && p.active === false);
+      return !!(p && p.sector != null && megaportSet.has(p.sector));
     }
   });
 

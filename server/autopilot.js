@@ -964,11 +964,18 @@ const decide = async (snapshot) => {
   // silently fails at the game layer and burns its cooldown.
   const fundingFloor = cfg.shipFundingFloor ?? cfg.creditsForRefuel ?? 1000;
   const primaryCanFund = primaryAvailable && primaryShip.sector === homeHub();
-  const needsFunding = (s) =>
-    s.credits != null &&
-    s.credits < fundingFloor &&
-    s.sector === homeHub() &&
-    !hasPlan(s.name);
+  // Credit-gate only — a ship is underfunded whenever it's below the floor,
+  // regardless of where it currently sits. Actually funding it still requires
+  // both ships co-located at the hub, but we must never dispatch trade on an
+  // underfunded hauler (agent just responds "still waiting for startup
+  // credits"). Split into two checks:
+  const isUnderfunded = (s) =>
+    s.credits != null && s.credits < fundingFloor && !hasPlan(s.name);
+  const fundableAtHub = (s) =>
+    isUnderfunded(s) && s.sector === homeHub() && primaryCanFund;
+  // Back-compat alias; probe dispatch still uses `needsFunding` with the old
+  // semantics (at-hub-and-fundable).
+  const needsFunding = fundableAtHub;
 
   // Prioritise probes already deployed in the field — they're mid-mission
   // (idle because the game capped the task at 100 steps or the agent paused)
@@ -1032,14 +1039,31 @@ const decide = async (snapshot) => {
     if (remainingSlots <= 0) break;
     if (!cfg.enabled.trade) break;
     if (hasPlan(hauler.name)) continue;
-    // Fund first if broke at hub — haulers especially need trading capital.
-    if (needsFunding(hauler)) {
-      if (!primaryCanFund) continue; // primary not co-located/idle — wait
-      const key = `fund:${hauler.name}`;
-      if (canAct(key, cfg.refuelCooldownSec * 1000)) {
-        pushInteractive({ key, ship: hauler.name, text: shipFundPrompt(hauler.name, hauler.credits, fundingFloor) });
+    // NEVER dispatch trade to an underfunded hauler — the agent just replies
+    // "still waiting for startup credits". If the hauler is at the hub and
+    // the primary can fund it, fire the fund prompt; otherwise skip silently
+    // (primary will reach the hub eventually, or the user can intervene).
+    if (isUnderfunded(hauler)) {
+      if (fundableAtHub(hauler)) {
+        const key = `fund:${hauler.name}`;
+        if (canAct(key, cfg.refuelCooldownSec * 1000)) {
+          pushInteractive({ key, ship: hauler.name, text: shipFundPrompt(hauler.name, hauler.credits, fundingFloor) });
+        }
+      } else {
+        const key = `underfunded:${hauler.name}`;
+        if (canAct(key, 5 * 60_000)) {
+          appendLog({
+            type: 'event',
+            intelType: 'hauler-underfunded',
+            ship: hauler.name,
+            credits: hauler.credits,
+            sector: hauler.sector,
+            snippet: `${hauler.name} has ${hauler.credits} credits (below ${fundingFloor}); not at hub or primary unavailable — deferring trade dispatch.`
+          });
+          state.lastDecisionAt.set(key, Date.now());
+        }
       }
-      continue; // skip dispatch this tick
+      continue;
     }
     const key = `trade:${hauler.name}`;
     if (!canAct(key, cooldownMs)) continue;
