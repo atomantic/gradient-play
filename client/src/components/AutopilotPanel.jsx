@@ -319,13 +319,26 @@ export const AutopilotPanel = () => {
                 onChange={(e) => setConfig({ ...config, troubleMaker: e.target.checked })} />
               troublemaker
             </label>
-            {Object.keys(config.enabled).map((k) => (
-              <label key={k} className="flex items-center gap-1 text-slate-400">
-                <input type="checkbox" checked={config.enabled[k]}
-                  onChange={(e) => setConfig({ ...config, enabled: { ...config.enabled, [k]: e.target.checked } })} />
-                {k}
-              </label>
-            ))}
+            {Object.keys(config.enabled).map((k) => {
+              const label = ({
+                refuel: 'refuel ships',
+                explore: 'probe exploration',
+                trade: 'corp hauler trade',
+                bank: 'bank sweeps',
+                upgrade: 'ship upgrades',
+                primary: 'primary trade'
+              })[k] || k;
+              return (
+                <label key={k} className="flex items-center gap-1 text-slate-400" title={k}>
+                  <input type="checkbox" checked={config.enabled[k]}
+                    onChange={(e) => setConfig({ ...config, enabled: { ...config.enabled, [k]: e.target.checked } })} />
+                  {label}
+                </label>
+              );
+            })}
+          </div>
+          <div className="text-[10px] text-slate-500 -mt-0.5">
+            Toggle to disable a subsystem. "corp hauler trade" stops autopilot from dispatching corp haulers on trade loops; "primary trade" stops the primary's trading task. Use these if ships are losing money and you want to pause the loops.
           </div>
           <div className="text-[10px] text-amber-400/70 -mt-0.5">
             Safe mode: non-probe ships stay in federation space. Probes may venture further.

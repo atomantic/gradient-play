@@ -248,6 +248,7 @@ const state = {
   subscribers: new Set(),
   plans: new Map(), // ship name → active plan (one at a time per ship)
   prevWarp: new Map(), // ship name → last-tick warp, used to detect in-flight ships
+  creditsHistory: new Map(), // ship name → ring buffer of [ts, credits] for loss detection
   stuckTicks: 0,       // consecutive ticks with ≥2 ships at critical warp — triggers AI advisor
   lastAdvisorAt: 0,    // ms timestamp of last advisor dispatch (30-min cooldown)
   lastStrategyAdvisorAt: 0, // ms timestamp of last strategy-advisor dispatch (separate cooldown from deadlock advisor)
@@ -1468,6 +1469,39 @@ const runTick = async () => {
     // Record current warp per ship so next tick can detect in-flight movement.
     for (const s of (snapshot?.extracted?.ships || [])) {
       if (s.name && s.warpPower != null) state.prevWarp.set(s.name, s.warpPower);
+    }
+
+    // Credit-loss watch. Keep a 6-tick ring buffer per corp ship and fire a
+    // one-shot alert when a hauler's credits have strictly decreased across
+    // the whole window — a sign the trade loop is net-negative (toll losses,
+    // thin margins, destroyed cargo). We don't auto-disable, just log so the
+    // operator can flip the "corp hauler trade" toggle in the UI.
+    const LOSS_WINDOW = 6;
+    const LOSS_MIN_DROP = 1000; // credits lost across the window before alerting
+    for (const s of (snapshot?.extracted?.ships || [])) {
+      if (!s.name || s.primary || s.credits == null) continue;
+      if (shipKind(s.name) !== 'hauler' && shipKind(s.name) !== 'trader-light') continue;
+      const hist = state.creditsHistory.get(s.name) || [];
+      hist.push({ ts: Date.now(), credits: s.credits });
+      while (hist.length > LOSS_WINDOW) hist.shift();
+      state.creditsHistory.set(s.name, hist);
+      if (hist.length < LOSS_WINDOW) continue;
+      let strictlyDecreasing = true;
+      for (let i = 1; i < hist.length; i++) {
+        if (hist[i].credits > hist[i - 1].credits) { strictlyDecreasing = false; break; }
+      }
+      const totalDrop = hist[0].credits - hist[hist.length - 1].credits;
+      if (strictlyDecreasing && totalDrop >= LOSS_MIN_DROP) {
+        const key = `trade-loss:${s.name}`;
+        if (canAct(key, 30 * 60_000)) {
+          appendLog({
+            type: 'error',
+            error: `${s.name} appears to be losing money on its trade loop (credits dropped from ${hist[0].credits} to ${hist[hist.length - 1].credits} across ${LOSS_WINDOW} ticks). consider disabling "corp hauler trade" in Autopilot settings.`,
+            ship: s.name
+          });
+          state.lastDecisionAt.set(key, Date.now());
+        }
+      }
     }
 
     // Deadlock detector: if ≥2 ships stay at critical warp for ≥5 consecutive
