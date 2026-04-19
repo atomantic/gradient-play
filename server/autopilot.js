@@ -208,6 +208,8 @@ const DEFAULTS = {
   corpTaskCap: 3,                 // fallback if DOM taskSlots.total isn't reported
   probeSlots: 2,                   // 2 probes for map expansion (explorer/scavenger) — refueler doesn't count
   tradeSlots: 1,                   // 1 corp hauler on a fedspace trade loop; fleet prioritises exploration
+  probeStockpileMin: 3,            // buy probes until we reach this count on hand at hub
+  probeStockpileMax: 8,            // target ceiling for auto-purchase (buy in batches to stay between min and max)
   primaryDispatchCooldownSec: 300,  // 5 min — tight enough to refill the local slot quickly when a task ends
   // Both preferred-route overrides are deprecated — all trade prompts
   // (primary and corp haulers) are non-prescriptive now. Kept in DEFAULTS
@@ -414,6 +416,13 @@ const probeRole = (name = '') => {
  * are eligible fuel donors and can be activated via rename.
  */
 const isReserveProbe = (name = '') => /^PROBE[A-Z]$/i.test(String(name).trim());
+
+/**
+ * Stockpile probes are pre-purchased refueling units named AP01…AP99.
+ * They sit idle at the home hub, top up haulers on demand, then get
+ * remote-sold once depleted. Net cost ≈ 0 (sell refund ≈ purchase price).
+ */
+const isStockpileProbe = (name = '') => /^AP\d+$/i.test(String(name).trim());
 
 /**
  * BFS hop-distance lookup from an origin sector. Returns a Map<sectorId,
@@ -666,6 +675,14 @@ const decide = async (snapshot) => {
   const primaryAvailable = !!primaryShip
     && primaryShip.active === false
     && !shipInAnyPlan(primaryShip.name);
+  const primaryAtMegaport = !!primaryShip && primaryShip.sector != null && megaportSet.has(primaryShip.sector);
+
+  // Stockpile probes (AP01…AP99): idle at hub, top up haulers, get remote-sold when dry.
+  // Sorted highest-warp-first so we dispatch the fullest probe and preserve partial ones.
+  const stockpileProbes = ships
+    .filter((s) => !s.primary && isStockpileProbe(s.name))
+    .sort((a, b) => (b.warpPower ?? 0) - (a.warpPower ?? 0));
+  const claimedStockpile = new Set();
 
   // Reserve bench — pre-purchased probes (PROBEA…PROBEZ). Sorted
   // alphabetically so activation is deterministic. They're donor-eligible
@@ -683,17 +700,70 @@ const decide = async (snapshot) => {
     return null;
   };
 
+  // ── Stockpile management ────────────────────────────────────────────────────
+  // Sell depleted stockpile probes (warp = 0). Remote sell — primary stays put,
+  // sell_ship only checks the primary's sector, not the probe's.
+  if (cfg.enabled.refuel && ceo) {
+    for (const p of stockpileProbes) {
+      if ((p.warpPower ?? 1) > 0) continue; // still has fuel — keep it
+      if (p.active === true) continue;
+      if (shipInAnyPlan(p.name)) continue;
+      const key = `sell-stockpile:${p.name}`;
+      if (canAct(key, cfg.rescueCooldownSec * 1000)) {
+        pushInteractive({
+          key,
+          ship: primaryName,
+          text: `sell ${p.name} — REMOTE SELL / DO NOT move ${p.name} / sell_ship only checks the primary's sector` + interactiveOnlyClause()
+        });
+        state.lastDecisionAt.set(key, Date.now());
+      }
+    }
+
+    // Buy new probes to top up the stockpile. Only when primary is docked at
+    // hub (ship_purchase spawns at the buyer's current sector).
+    const activeStockpile = stockpileProbes.filter((p) => (p.warpPower ?? 0) > 0).length;
+    const stockpileMin = cfg.probeStockpileMin ?? 3;
+    const stockpileMax = cfg.probeStockpileMax ?? 8;
+    if (primaryAtMegaport && primaryAvailable && activeStockpile < stockpileMin) {
+      // Next AP number: highest existing + 1, zero-padded to 2 digits.
+      const maxNum = ships.reduce((m, s) => {
+        const match = /^AP(\d+)$/i.exec(String(s.name).trim());
+        return match ? Math.max(m, parseInt(match[1], 10)) : m;
+      }, 0);
+      const nextName = `AP${String(maxNum + 1).padStart(2, '0')}`;
+      const toBuy = Math.min(stockpileMax - activeStockpile, 1); // one per tick
+      if (toBuy > 0) {
+        const key = `buy-stockpile:${nextName}`;
+        if (canAct(key, cfg.refuelCooldownSec * 1000)) {
+          pushInteractive({
+            key,
+            ship: primaryName,
+            text: `ship_purchase an Autonomous Probe, rename it ${nextName}` + interactiveOnlyClause()
+          });
+          state.lastDecisionAt.set(key, Date.now());
+        }
+      }
+    }
+  }
+
   const MIN_DONOR_WARP = 50; // enough to reach a nearby target and transfer a usable amount
 
+  // Field rescue only fires for truly stranded ships (< fuelCriticalWarp).
+  // Ships between fuelCriticalWarp and dispatchMinWarp use the hub-routing
+  // + stockpile-top-up path below instead — simpler and probe-cost-free.
   const isRescueCandidate = (s) => {
     if (!s) return false;
     if (s.warpPower == null) return false;
     if (s.active === true) return false;
     if (shipInAnyPlan(s.name)) return false;
     // Probes are disposable — don't refuel them, scrap + replace instead.
+    // Stockpile probes (AP##) are sold when depleted, not rescued.
     if (shipKind(s.name) === 'probe') return false;
+    if (isStockpileProbe(s.name)) return false;
     if (!ceo && !s.primary) return false;
-    const threshold = cfg.dispatchMinWarp ?? cfg.minWarp ?? 200;
+    // Only field-rescue truly stranded ships. Ships with warp between
+    // fuelCriticalWarp and dispatchMinWarp route to hub on their own.
+    const threshold = cfg.fuelCriticalWarp ?? 15;
     return s.warpPower < threshold;
   };
 
@@ -801,6 +871,68 @@ const decide = async (snapshot) => {
     }
   }
 
+  // ── Hub-based refueling ──────────────────────────────────────────────────────
+  // Ships with enough warp to travel but below dispatchMinWarp get routed home.
+  // Once docked, stockpile probes top them up. Simpler than field rescue and
+  // leaves probes at hub ready for the next trader that needs fuel.
+  if (cfg.enabled.refuel) {
+    const critWarp = cfg.fuelCriticalWarp ?? 15;
+    const minDispatch = cfg.dispatchMinWarp ?? cfg.minWarp ?? 200;
+
+    // Route low-warp ships to hub (non-stranded — they have enough warp to travel).
+    for (const s of ships) {
+      if (s.primary) continue; // primary manages its own routing
+      if (!ceo) break;
+      if (['hauler', 'trader-light'].includes(shipKind(s.name)) === false) continue;
+      if (s.active === true) continue;
+      if (shipInAnyPlan(s.name)) continue;
+      if (s.warpPower == null) continue;
+      if (s.warpPower >= minDispatch) continue;      // fine — will be dispatched normally
+      if (s.warpPower < critWarp) continue;          // truly stranded — field rescue handles it
+      if (s.sector != null && megaportSet.has(s.sector)) continue; // already at a megaport
+      const key = `route-to-hub:${s.name}`;
+      if (canAct(key, cfg.refuelCooldownSec * 1000)) {
+        pushInteractive({
+          key,
+          ship: s.name,
+          text: `${s.name}: plot_course to sector ${homeHub()} for warp refuel` + interactiveOnlyClause()
+        });
+        state.lastDecisionAt.set(key, Date.now());
+      }
+    }
+
+    // Top up low-warp ships that are already docked at any megaport.
+    // Pick the fullest available stockpile probe as donor — one per ship per tick.
+    const availableStockpile = stockpileProbes.filter((p) =>
+      !claimedStockpile.has(p.name)
+      && !shipInAnyPlan(p.name)
+      && p.active !== true
+      && (p.warpPower ?? 0) > 0
+      && p.sector != null && megaportSet.has(p.sector) // probe must be at a megaport too
+    );
+    for (const s of ships) {
+      if (s.primary) continue;
+      if (!ceo) break;
+      if (['hauler', 'trader-light'].includes(shipKind(s.name)) === false) continue;
+      if (s.active === true) continue;
+      if (shipInAnyPlan(s.name)) continue;
+      if (s.warpPower == null || s.warpPower >= minDispatch) continue;
+      if (s.sector == null || !megaportSet.has(s.sector)) continue; // not at megaport yet
+      const probe = availableStockpile.shift();
+      if (!probe) break; // out of stockpile — next tick after buy
+      claimedStockpile.add(probe.name);
+      const key = `hub-refuel:${probe.name}:${s.name}`;
+      if (canAct(key, cfg.refuelCooldownSec * 1000)) {
+        pushInteractive({
+          key,
+          ship: probe.name,
+          text: `${probe.name}: transfer_warp_power to fill up ${s.name}'s tank as much as possible` + interactiveOnlyClause()
+        });
+        state.lastDecisionAt.set(key, Date.now());
+      }
+    }
+  }
+
   // Auto-shorten long probe names. Fresh purchases sometimes arrive with
   // date-stamped auto-names like "SAME AUTO PROBE 2026-04-18" which are
   // hard to distinguish in the UI. Ask the agent to pick a short unique
@@ -844,7 +976,7 @@ const decide = async (snapshot) => {
     // enough to reach one more known-unvisited sector before the probe
     // halts. Only scrap at literal zero.
     const SCRAP_WARP_CEILING = 0;
-    const primaryAtMegaport = primaryShip.sector != null && megaportSet.has(primaryShip.sector);
+    // primaryAtMegaport is hoisted to outer decide() scope
     // New probe spawns wherever the primary is docked when it calls
     // ship_purchase. That's the primary's current sector when it's already at
     // a megaport, otherwise the home hub the replace prompt routes it to.
