@@ -221,6 +221,71 @@ export const buildRefuelerRescuePlan = (target, donor, { transferAmt = 300 } = {
 };
 
 /**
+ * Buy-probe-refuel plan: when no idle probe donor exists, the primary routes to
+ * the home hub, buys a fresh probe, dispatches it to transfer_warp_power to the
+ * stranded ship, then remote-sells the depleted probe. Net cost ≈ 0 (sell
+ * refund covers the purchase). The probe is intentionally run dry — one-use.
+ */
+export const buildBuyProbeRefuelPlan = (target, primary, { hubSector = 1413, megaports = [305, 472, 1413] } = {}) => {
+  const megaportSet = new Set(megaports);
+  const primaryName = primary.name;
+  const targetName = target.name;
+  const locHint = target.sector != null ? ` at sector ${target.sector}` : '';
+
+  const steps = [];
+
+  steps.push({
+    name: 'route-primary-to-hub',
+    prompt: `${primaryName}: plot_course to sector ${hubSector} and dock. interrupt current task if needed. execute immediately, no confirmation.`,
+    nagMs: 120_000,
+    maxMs: 8 * 60_000,
+    isDone: (snap) => {
+      const p = (snap?.extracted?.ships || []).find((s) => s.name === primaryName);
+      if (p && p.sector != null && megaportSet.has(p.sector)) return true;
+      const msgs = snap?.extracted?.lastMessages || [];
+      const recent = msgs.slice(-6).join(' ').toLowerCase();
+      const hubStr = String(hubSector);
+      const dockedAtHub = new RegExp(
+        `(?:already\\s+docked|docked\\s+(?:at|in)|at\\s+(?:sector\\s+)?${hubStr}\\b|already\\s+at\\s+(?:sector\\s+)?${hubStr}\\b)`,
+        'i'
+      );
+      return dockedAtHub.test(recent) && recent.includes(hubStr);
+    }
+  });
+
+  steps.push({
+    name: 'buy-rescue-probe',
+    prompt: `${primaryName}: at sector ${hubSector} — 1) ship_purchase an Autonomous Probe, 2) immediately start_task that probe to plot_course to ${targetName}${locHint} and transfer_warp_power, transferring as much warp as possible. The probe runs dry on purpose and will be sold after. execute now, no confirmation.`,
+    nagMs: 90_000,
+    maxMs: 12 * 60_000,
+    isDone: (snap) => {
+      const ships = snap?.extracted?.ships || [];
+      const t = ships.find((s) => s.name === targetName);
+      if (!t || t.warpPower == null) return false;
+      return t.warpPower >= 100;
+    }
+  });
+
+  steps.push({
+    name: 'sell-rescue-probe',
+    prompt: `The rescue probe has completed its delivery and is near 0 warp. REMOTE SELL / DO NOT move the probe. sell_ship only checks the primary's sector — ${primaryName} calls sell_ship on the rescue probe (the most recently purchased probe in the fleet). execute now, no confirmation.`,
+    nagMs: 60_000,
+    maxMs: 5 * 60_000,
+    isDone: (snap) => {
+      const ships = snap?.extracted?.ships || [];
+      return !ships.some((s) => !s.primary && isProbe(s) && (s.warpPower ?? 1) === 0);
+    }
+  });
+
+  return newPlan({
+    ship: primaryName,
+    goal: 'buy-probe-refuel',
+    steps,
+    context: { target: targetName, blockedShips: [targetName] }
+  });
+};
+
+/**
  * Probe-replacement plan: the primary decommissions a dead probe and
  * activates a reserve (or buys a new hull) as its replacement. sell_ship
  * only works from a megaport, so step 1 routes the primary there first —

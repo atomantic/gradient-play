@@ -1,6 +1,6 @@
 import { getGameSnapshot, sendAssistantPrompt, clickGameReconnect, loginIfNeeded, getMapSectors } from './cdp.js';
 import { observe as intelObserve } from './intel.js';
-import { buildRefuelerRescuePlan, buildProbeReplacementPlan, buildFleetRallyPlan, FLEET_PLAN_KEY, currentStepOf, isComplete, advance } from './plans.js';
+import { buildRefuelerRescuePlan, buildBuyProbeRefuelPlan, buildProbeReplacementPlan, buildFleetRallyPlan, FLEET_PLAN_KEY, currentStepOf, isComplete, advance } from './plans.js';
 
 const pick = (arr) => arr[Math.floor(Math.random() * arr.length)];
 
@@ -144,6 +144,15 @@ const primaryTroubleMakerPrompt = (primary) => {
     `${primary}: frontier salvage hunt. first deposit excess to bank (keep 1000), then exit fedspace, claim salvage, combat OK, trade as needed to stay fueled. hub ${homeHub()} for refuel cycles.`,
     `${primary}: reckless explorer. deposit bank down to 1000 on-hand, venture into the unknown beyond fedspace, grab salvage, fight for it, trade minimally for fuel. refuel at hub ${homeHub()} between runs.`
   ]) + orders;
+};
+
+// Used when primary + all haulers need dispatching simultaneously. One prompt
+// covers the whole fleet — faster than N individual prompts and avoids the
+// interPromptDelay gap between ships. The agent calls start_task for each
+// named ship; standingOrders appended for the fleet-wide policy.
+const coordinatedTradePrompt = (shipNames) => {
+  const list = shipNames.join(', ');
+  return `put ${list} in coordinated trade mode in fedspace — all ships trade continuously until they need fuel` + standingOrders();
 };
 
 // Per-user config overrides loaded from data/config.json (git-ignored). This
@@ -743,16 +752,40 @@ const decide = async (snapshot) => {
       if (slotBudget <= 0) break;
       const donor = pickDonor(target, mapSectors);
       if (!donor) {
-        const key = `no-donor:${target.name}`;
-        if (canAct(key, cfg.rescueCooldownSec * 1000)) {
-          appendLog({
-            type: 'event',
-            intelType: 'no-donor-available',
-            ship: target.name,
-            warp: target.warpPower,
-            snippet: `${target.name} needs fuel (${target.warpPower} warp) — no probe with ≥ ${MIN_DONOR_WARP} warp available to donate.`
+        // No idle probe donor — buy one at the home hub, run it dry rescuing
+        // the target, then remote-sell it. Primary must be free and at hub
+        // (or able to route there). Falls back to a log if primary is busy.
+        const buyKey = `buy-probe-refuel:${target.name}`;
+        if (
+          primaryAvailable
+          && !shipInAnyPlan(primaryShip.name)
+          && slotBudget > 0
+          && canAct(buyKey, cfg.rescueCooldownSec * 1000)
+        ) {
+          const plan = buildBuyProbeRefuelPlan(target, primaryShip, {
+            hubSector: homeHub(),
+            megaports: megaportSectors()
           });
-          state.lastDecisionAt.set(key, Date.now());
+          slotBudget -= 1;
+          out.push({
+            key: `plan-create:${buyKey}`,
+            ship: primaryShip.name,
+            createPlan: plan,
+            createsTask: true
+          });
+          state.lastDecisionAt.set(buyKey, Date.now());
+        } else {
+          const key = `no-donor:${target.name}`;
+          if (canAct(key, cfg.rescueCooldownSec * 1000)) {
+            appendLog({
+              type: 'event',
+              intelType: 'no-donor-available',
+              ship: target.name,
+              warp: target.warpPower,
+              snippet: `${target.name} needs fuel (${target.warpPower} warp) — no probe donor available and primary busy; manual intervention needed.`
+            });
+            state.lastDecisionAt.set(key, Date.now());
+          }
         }
         continue;
       }
@@ -890,6 +923,17 @@ const decide = async (snapshot) => {
   const activeCorp = corpShips.filter((s) => s.active === true);
   const activeProbeCount = activeCorp.filter((s) => shipKind(s.name) === 'probe').length;
 
+  // Computed early so coordinated-trade preemption (below) and the primary
+  // dispatch section both read the same values without duplication.
+  const _workingTaskCount = (ex.tasks || []).filter((t) => t.working).length;
+  const _primaryTaskCount = ex.taskSlots?.used != null
+    ? Math.max(0, ex.taskSlots.used - activeCorp.length)
+    : Math.max(0, _workingTaskCount - activeCorp.length);
+  const primaryHasTask = _primaryTaskCount > 0;
+  const _nowMs = Date.now();
+  const probeReplaceRecent = [...state.lastDecisionAt.entries()]
+    .some(([k, ts]) => k.startsWith('probe-replace:') && (_nowMs - ts) < 3 * 60_000);
+
   // Idle ships must have enough warp to meaningfully execute a new task.
   // Haulers/traders use dispatchMinWarp (~200) so they don't strand mid-trade.
   // Probes use a much lower floor (10 warp) — the explorer's directive is
@@ -977,6 +1021,39 @@ const decide = async (snapshot) => {
   // Back-compat alias; probe dispatch still uses `needsFunding` with the old
   // semantics (at-hub-and-fundable).
   const needsFunding = fundableAtHub;
+
+  // Coordinated trade: if primary + ≥1 idle hauler all need dispatching at the
+  // same time, collapse N individual prompts into one. The agent calls
+  // start_task for each named ship in a single game-chat message — faster than
+  // N throttled ticks and avoids mid-dispatch state drift. Individual dispatch
+  // sections below skip ships whose cooldown key was already marked here.
+  if (cfg.enabled.trade && cfg.enabled.primary && !cfg.troubleMaker && !skipCorpWork && ceo && slotBudget > 0) {
+    const primaryNeedsTrade = primaryShip
+      && !primaryHasTask
+      && !probeReplaceRecent
+      && primaryShip.warpPower != null
+      && primaryShip.warpPower >= (cfg.dispatchMinWarp ?? cfg.minWarp)
+      && !hasPlan(primaryShip.name)
+      && canAct('primary:trade', cfg.primaryDispatchCooldownSec * 1000);
+    if (primaryNeedsTrade) {
+      const activeTrades = activeCorp.filter((s) => ['hauler', 'trader-light'].includes(shipKind(s.name))).length;
+      const maxToCoord = Math.max(0, (cfg.tradeSlots ?? 2) - activeTrades);
+      const haulersToCoord = idleHaulers
+        .filter((h) => !isUnderfunded(h) && !hasPlan(h.name) && canAct(`trade:${h.name}`, cooldownMs))
+        .slice(0, maxToCoord);
+      if (haulersToCoord.length >= 1) {
+        const allNames = [primaryShip.name, ...haulersToCoord.map((h) => h.name)];
+        const coordKey = `trade:coordinated:${[...allNames].sort().join(':')}`;
+        if (canAct(coordKey, cooldownMs)) {
+          if (pushTaskDecision({ key: coordKey, ship: primaryShip.name, text: coordinatedTradePrompt(allNames) })) {
+            state.lastDecisionAt.set('primary:trade', _nowMs);
+            state.lastDecisionAt.set(coordKey, _nowMs);
+            for (const h of haulersToCoord) state.lastDecisionAt.set(`trade:${h.name}`, _nowMs);
+          }
+        }
+      }
+    }
+  }
 
   // Prioritise probes already deployed in the field — they're mid-mission
   // (idle because the game capped the task at 100 steps or the agent paused)
@@ -1159,54 +1236,37 @@ const decide = async (snapshot) => {
   // the primary's local slot. Scraped ENGINE STATUS cards can briefly drop the
   // WORKING flag during handoff, which caused spurious re-dispatch on top of
   // an already-running primary task.
+  // primaryHasTask and probeReplaceRecent are computed early (above) so the
+  // coordinated-trade preemption can read them before this section runs.
   if (cfg.enabled.primary && ex.shipName) {
-    const primary = ships.find((s) => s.primary);
-    const workingTaskCount = (ex.tasks || []).filter((t) => t.working).length;
-    const activeCorpCount = activeCorp.length;
-    const primaryTaskCount = ex.taskSlots?.used != null
-      ? Math.max(0, ex.taskSlots.used - activeCorpCount)
-      : Math.max(0, workingTaskCount - activeCorpCount);
-    const primaryHasTask = primaryTaskCount > 0;
-
-    // Probe-replace race guard: if any probe-replace was dispatched in the
-    // last 3 min, the primary is likely mid-sequence (route → sell → buy →
-    // start_task). Don't hand it a new trade task on top of that — it causes
-    // the agent to drop the replacement mid-flight.
-    const now = Date.now();
-    const probeReplaceRecent = [...state.lastDecisionAt.entries()]
-      .some(([k, ts]) => k.startsWith('probe-replace:') && (now - ts) < 3 * 60_000);
-
     // Informational warning only when the primary's name collides with the
     // probe naming pattern — dispatch still fires because `primary: true`
     // from the DOM is authoritative regardless of the ship's chosen name.
-    // If this is unexpected the user should rename the primary from the
-    // in-game chat (e.g. "rename my ship to X"); the primary flag stays
-    // with whichever hull the HUD player-name element points at.
-    if (primary && shipKind(primary.name) === 'probe') {
-      const key = `primary-name-warn:${primary.name}`;
+    if (primaryShip && shipKind(primaryShip.name) === 'probe') {
+      const key = `primary-name-warn:${primaryShip.name}`;
       if (canAct(key, 30 * 60_000)) {
-        appendLog({ type: 'event', intelType: 'primary-name-warning', ship: primary.name, snippet: `primary "${primary.name}" matches the probe naming pattern. trade dispatch still works (DOM primary flag is authoritative). if unexpected, rename the primary from the game chat.` });
+        appendLog({ type: 'event', intelType: 'primary-name-warning', ship: primaryShip.name, snippet: `primary "${primaryShip.name}" matches the probe naming pattern. trade dispatch still works (DOM primary flag is authoritative). if unexpected, rename the primary from the game chat.` });
         state.lastDecisionAt.set(key, Date.now());
       }
     }
 
     if (
-      primary &&
+      primaryShip &&
       !primaryHasTask &&
       !probeReplaceRecent &&
-      primary.warpPower != null &&
+      primaryShip.warpPower != null &&
       // Use dispatchMinWarp (~200) not minWarp (~50): at 50 warp the primary
       // could start a trade loop and strand itself mid-hop before returning
       // to refuel. 200 gives comfortable round-trip headroom.
-      primary.warpPower >= (cfg.dispatchMinWarp ?? cfg.minWarp) &&
-      !hasPlan(primary.name)
+      primaryShip.warpPower >= (cfg.dispatchMinWarp ?? cfg.minWarp) &&
+      !hasPlan(primaryShip.name)
     ) {
       const key = cfg.troubleMaker ? 'primary:troublemaker' : 'primary:trade';
       if (canAct(key, cfg.primaryDispatchCooldownSec * 1000)) {
         const text = cfg.troubleMaker
-          ? primaryTroubleMakerPrompt(primary.name)
-          : primaryTradePrompt(primary.name);
-        pushTaskDecision({ key, ship: primary.name, text });
+          ? primaryTroubleMakerPrompt(primaryShip.name)
+          : primaryTradePrompt(primaryShip.name);
+        pushTaskDecision({ key, ship: primaryShip.name, text });
       }
     }
   }
