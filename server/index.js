@@ -18,11 +18,11 @@ if (existsSync(ENV_FILE)) {
   }
 }
 
-import { connectGamePage, getGameSnapshot, sendAssistantPrompt, getConnectionStatus, loginIfNeeded, selectCharacterIfNeeded } from './cdp.js';
+import { connectGamePage, getGameSnapshot, sendAssistantPrompt, getConnectionStatus, loginIfNeeded, selectCharacterIfNeeded, clickGameReconnect } from './cdp.js';
 import { createMission, listMissions, getMission, abortMission, untrackMission, subscribeMissionLog } from './missions.js';
 import { loadMissionTemplates, saveMissionTemplate, deleteMissionTemplate } from './templates.js';
 import { credentialsStatus, setCredentials, clearCredentials } from './credentials.js';
-import { startAutopilot, stopAutopilot, getAutopilotState, subscribeAutopilotLog, startFleetRally, fireRallyStep } from './autopilot.js';
+import { startAutopilot, stopAutopilot, getAutopilotState, subscribeAutopilotLog, startFleetRally, fireRallyStep, dryRunDecide } from './autopilot.js';
 import { getIntel, addManualEvent, updateEvent as updateIntelEvent, deleteEvent, clearIntel, observe as intelObserve } from './intel.js';
 import { aiToolkit, adviseAutopilot, adviseWithStrategy } from './advisor.js';
 
@@ -212,6 +212,22 @@ app.post('/api/fleet/step', async (req, res) => {
   res.json(result);
 });
 
+app.post('/api/autopilot/dry-run', async (req, res) => {
+  const { config = {} } = req.body || {};
+  const snap = await getGameSnapshot();
+  const decisions = await dryRunDecide(snap, config);
+  res.json({
+    ok: true,
+    ships: (snap?.extracted?.ships || []).map((s) => ({
+      name: s.name, primary: s.primary, warp: s.warpPower, warpMax: s.warpMax, sector: s.sector, active: s.active
+    })),
+    decisions: decisions.map((d) => ({
+      key: d.key, ship: d.ship, text: d.text, createsTask: d.createsTask,
+      planGoal: d.createPlan?.goal, planSteps: d.createPlan?.steps?.map((st) => st.name)
+    }))
+  });
+});
+
 app.post('/api/autopilot/start', (req, res) => {
   const result = startAutopilot(req.body || {});
   log(result.ok ? '🤖' : '⚠️', `Autopilot start ${result.ok ? 'ok' : 'failed'}`, { error: result.error });
@@ -265,6 +281,21 @@ app.post('/api/cdp/login', async (_req, res) => {
   const result = await loginIfNeeded();
   log(result.ok ? '✅' : '❌', `Login ${result.ok ? 'ok' : 'failed'}`, { via: result.via, error: result.error });
   res.json(result);
+});
+
+// Click the in-game "DISCONNECTED" modal's RECONNECT button, then run
+// loginIfNeeded after the page reloads. Safe to call when no modal is up —
+// returns ok:false with reason:'no-reconnect-button' and skips login.
+app.post('/api/cdp/reconnect', async (_req, res) => {
+  log('🔁', 'Game reconnect requested');
+  const click = await clickGameReconnect().catch((e) => ({ ok: false, error: e.message }));
+  if (!click.ok) {
+    log('⚠️', 'Reconnect click skipped', { reason: click.reason, error: click.error });
+    return res.json({ ok: false, click });
+  }
+  const login = await loginIfNeeded().catch((e) => ({ ok: false, error: e.message }));
+  log(login.ok ? '✅' : '❌', `Reconnect+login ${login.ok ? 'ok' : 'failed'}`, { via: login.via, error: login.error });
+  res.json({ ok: !!login.ok, click, login });
 });
 
 app.get('/api/templates', (_req, res) => {
@@ -327,6 +358,30 @@ app.use((req, res, next) => {
 <p>For dev with HMR, run <code>npm run dev</code> and open <a href="http://127.0.0.1:5571/">http://127.0.0.1:5571/</a>.</p>
 </body>`);
 });
+
+// Background watchdog: when autopilot is stopped, the tick loop isn't running
+// and the game's "DISCONNECTED" modal sits forever. Poll every 30s and
+// auto-click RECONNECT + re-login when the modal appears. Skips when autopilot
+// is running — the tick loop already handles it there.
+const RECONNECT_WATCHDOG_MS = 30_000;
+let reconnectInFlight = false;
+setInterval(async () => {
+  if (reconnectInFlight) return;
+  if (getAutopilotState()?.running) return;
+  const snap = await getGameSnapshot().catch(() => null);
+  if (!snap?.extracted?.gameDisconnected) return;
+  reconnectInFlight = true;
+  log('🔁', 'Watchdog: DISCONNECTED modal detected — auto-reconnecting');
+  const click = await clickGameReconnect().catch((e) => ({ ok: false, error: e.message }));
+  const login = click.ok
+    ? await loginIfNeeded().catch((e) => ({ ok: false, error: e.message }))
+    : null;
+  log(login?.ok ? '✅' : '⚠️', 'Watchdog reconnect complete', {
+    click: click.ok, clickErr: click.reason || click.error,
+    login: login?.ok, loginVia: login?.via, loginErr: login?.error
+  });
+  reconnectInFlight = false;
+}, RECONNECT_WATCHDOG_MS);
 
 const server = createServer(app);
 server.on('error', (err) => {

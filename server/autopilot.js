@@ -75,11 +75,10 @@ const probeExplorePrompt = (probe, target, opts) => probeTaskPrompt(probe, 'expl
 const scavengerPrompt = (scav, target, opts) => probeTaskPrompt(scav, 'scavenger', target, opts);
 const explorerPrompt = (expl, target, opts) => probeTaskPrompt(expl, 'explorer', target, opts);
 
-const haulerTradePrompt = (hauler) => pick([
-  `${hauler}: trade in fedspace, route is your call.`,
-  `${hauler}: start trading in fedspace — pick whatever route looks best.`,
-  `${hauler}: fedspace trade run, your choice of ports.`
-]) + standingOrders(hauler);
+// Unused after the switch to fleet-wide coordinated trade; kept as a
+// reference for any future scenario that needs per-ship dispatch.
+const haulerTradePrompt = (hauler) =>
+  `${hauler}: fedspace trade run, your choice of ports.` + standingOrders(hauler);
 
 // The agent categorically refuses to run bank_deposit interactively — its
 // standing rule is "banking operations require a dedicated task." So we
@@ -126,11 +125,10 @@ const upgradePrompt = (shipName, total, next) => pick([
   `swap ${shipName} → ${next.name} next megaport` + interactiveOnlyClause()
 ]);
 
-const primaryTradePrompt = (primary) => pick([
-  `${primary}: trade in fedspace, route is your call.`,
-  `${primary}: start trading in fedspace — pick whatever route looks best.`,
-  `${primary}: fedspace trade run, your choice of ports.`
-]) + standingOrders(primary);
+// Unused after the switch to fleet-wide coordinated trade; kept as a
+// reference in case an ad-hoc primary-only dispatch is ever needed.
+const primaryTradePrompt = (primary) =>
+  `${primary}: fedspace trade run, your choice of ports.` + standingOrders(primary);
 
 /**
  * Reckless frontier mode for the primary ship. Leaves fedspace, hunts
@@ -146,14 +144,13 @@ const primaryTroubleMakerPrompt = (primary) => {
   ]) + orders;
 };
 
-// Used when primary + all haulers need dispatching simultaneously. One prompt
-// covers the whole fleet — faster than N individual prompts and avoids the
-// interPromptDelay gap between ships. The agent calls start_task for each
-// named ship; standingOrders appended for the fleet-wide policy.
-const coordinatedTradePrompt = (shipNames) => {
-  const list = shipNames.join(', ');
-  return `put ${list} in coordinated trade mode in fedspace — all ships trade continuously until they need fuel` + standingOrders();
-};
+// Single fleet-wide trade directive. The agent walks the fleet and calls
+// start_task for every idle ship with enough warp. One prompt replaces the
+// per-ship trade dispatches we used to fire (primaryTradePrompt /
+// haulerTradePrompt), which means one throttle slot instead of N and no
+// mid-tick drift between ships. standingOrders appended for bank/toll policy.
+const coordinatedTradePrompt = () =>
+  'run all ships (including my primary) on coordinated fedspace-only trade loops until they are out of warp fuel.';
 
 // Per-user config overrides loaded from data/config.json (git-ignored). This
 // is how individual corp members set their own isCeo flag, homeHub, etc.
@@ -208,9 +205,11 @@ const DEFAULTS = {
   corpTaskCap: 3,                 // fallback if DOM taskSlots.total isn't reported
   probeSlots: 2,                   // 2 probes for map expansion (explorer/scavenger) — refueler doesn't count
   tradeSlots: 1,                   // 1 corp hauler on a fedspace trade loop; fleet prioritises exploration
-  probeStockpileMin: 3,            // buy probes until we reach this count on hand at hub
-  probeStockpileMax: 8,            // target ceiling for auto-purchase (buy in batches to stay between min and max)
+  probeStockpileMin: 20,           // buy probes until we reach this count of fuelled probes on hand at hub
+  probeStockpileMax: 25,           // target ceiling (only the min gate is load-bearing — we buy one/tick while below min)
   primaryDispatchCooldownSec: 300,  // 5 min — tight enough to refill the local slot quickly when a task ends
+  fleetTradeCooldownSec: 90,        // re-prompt an idle fleet within ~90s of tasks completing; idempotent so no flood risk
+  hubReturnWarp: 100,               // below this fuel, pull ships back to the home hub for refuel
   // Both preferred-route overrides are deprecated — all trade prompts
   // (primary and corp haulers) are non-prescriptive now. Kept in DEFAULTS
   // so older data/config.json files don't fail validation.
@@ -392,6 +391,11 @@ const shipKind = (name = '') => {
   if (/KESTREL|SPARROW|COURIER/.test(n)) return 'trader-light';
   if (/CORSAIR|PIKE|BULWARK|AEGIS|SOVEREIGN|RAIDER|FRIGATE|DESTROYER|CRUISER/.test(n)) return 'combat';
   if (/PROBE|EXPLORER|SCAVENGER|SALVAGER|SCOUT|PATHFINDER|REFUELER|TANKER|FUEL/.test(n)) return 'probe';
+  // Compact corp-tag naming used in-game: "SAME-AP23" is an autonomous
+  // probe, "SAME-A1" is a hauler. Without this fallback, cdp-scraped names
+  // resolve to 'unknown' and the refuel/trade/stockpile logic all bails.
+  if (/(?:^|[-_\s])AP\d+$/.test(n)) return 'probe';
+  if (/(?:^|[-_\s])A\d+$/.test(n)) return 'hauler';
   return 'unknown';
 };
 
@@ -415,14 +419,14 @@ const probeRole = (name = '') => {
  * of the explorer dispatch loop so they sit idle on the bench, but they
  * are eligible fuel donors and can be activated via rename.
  */
-const isReserveProbe = (name = '') => /^PROBE[A-Z]$/i.test(String(name).trim());
+const isReserveProbe = (name = '') => /(?:^|[-_\s])PROBE[A-Z]$/i.test(String(name).trim());
 
 /**
  * Stockpile probes are pre-purchased refueling units named AP01…AP99.
  * They sit idle at the home hub, top up haulers on demand, then get
  * remote-sold once depleted. Net cost ≈ 0 (sell refund ≈ purchase price).
  */
-const isStockpileProbe = (name = '') => /^AP\d+$/i.test(String(name).trim());
+const isStockpileProbe = (name = '') => /(?:^|[-_\s])AP\d+$/i.test(String(name).trim());
 
 /**
  * BFS hop-distance lookup from an origin sector. Returns a Map<sectorId,
@@ -635,6 +639,10 @@ const decide = async (snapshot) => {
   // CEOs (or a non-CEO) fire dispatches, they trample each other. Default
   // off; flip on from the UI.
   const ceo = !!cfg.isCeo;
+  // Perpetual fleet mode: CEO with no explorer probes configured. All idle
+  // haulers trade together (tradeSlots cap bypassed); the hub routing +
+  // stockpile refuel logic handles the refuel phase between trading cycles.
+  const perpetualFleetMode = ceo && (cfg.probeSlots ?? 2) === 0;
 
   // When a fleet-wide rally plan is running, it owns every ship — skip all
   // per-ship decisions so we don't interfere with the coordinated operation.
@@ -726,8 +734,9 @@ const decide = async (snapshot) => {
     const stockpileMax = cfg.probeStockpileMax ?? 8;
     if (primaryAtMegaport && primaryAvailable && activeStockpile < stockpileMin) {
       // Next AP number: highest existing + 1, zero-padded to 2 digits.
+      // Tolerate corp-tag prefix (e.g., "SAME-AP40") so we don't restart at AP01.
       const maxNum = ships.reduce((m, s) => {
-        const match = /^AP(\d+)$/i.exec(String(s.name).trim());
+        const match = /(?:^|[-_\s])AP(\d+)$/i.exec(String(s.name).trim());
         return match ? Math.max(m, parseInt(match[1], 10)) : m;
       }, 0);
       const nextName = `AP${String(maxNum + 1).padStart(2, '0')}`;
@@ -860,7 +869,11 @@ const decide = async (snapshot) => {
         continue;
       }
       const transferAmt = Math.max(100, Math.min((donor.warpPower ?? 0) - 20, 400));
-      const plan = buildRefuelerRescuePlan(target, donor, { transferAmt });
+      const plan = buildRefuelerRescuePlan(target, donor, {
+        transferAmt,
+        hubSector: homeHub(),
+        megaports: megaportSectors()
+      });
       slotBudget -= 1;
       out.push({
         key: `plan-create:fuel-delivery:${donor.name}:${target.name}`,
@@ -871,6 +884,25 @@ const decide = async (snapshot) => {
     }
   }
 
+  // Two related guards, applied to primary only:
+  //   1. hubReturnWarp (default 100) — the field threshold for "go home".
+  //      Keeps primary trading until fuel is genuinely low instead of yanking
+  //      it home with a partial tank after every rescue or short run.
+  //   2. primaryHoldForRefuel — once primary is AT a hub and below near-full,
+  //      hold trade dispatch so the hub-top-up pass can finish filling it
+  //      before the next run. Without this, a primary that just docked at
+  //      400 warp gets "top up" and "start trading" in the same tick.
+  const _stockpileReadyAtHub = stockpileProbes.some((p) =>
+    (p.warpPower ?? 0) > 0 && p.sector != null && megaportSet.has(p.sector)
+    && p.active !== true && !shipInAnyPlan(p.name)
+  );
+  const _primaryAtHub = primaryShip && primaryShip.sector != null && megaportSet.has(primaryShip.sector);
+  const _primaryNearFull = primaryShip && primaryShip.warpPower != null
+    && primaryShip.warpPower >= (primaryShip.warpMax != null
+      ? primaryShip.warpMax - 50
+      : (cfg.dispatchMinWarp ?? cfg.minWarp));
+  const primaryHoldForRefuel = _primaryAtHub && !_primaryNearFull && _stockpileReadyAtHub;
+
   // ── Hub-based refueling ──────────────────────────────────────────────────────
   // Ships with enough warp to travel but below dispatchMinWarp get routed home.
   // Once docked, stockpile probes top them up. Simpler than field rescue and
@@ -879,17 +911,24 @@ const decide = async (snapshot) => {
     const critWarp = cfg.fuelCriticalWarp ?? 15;
     const minDispatch = cfg.dispatchMinWarp ?? cfg.minWarp ?? 200;
 
-    // Route low-warp ships to hub (non-stranded — they have enough warp to travel).
+    // Route low-warp ships to hub only once fuel is genuinely low — under
+    // cfg.hubReturnWarp (default 100). This lets ships finish their trade
+    // runs naturally instead of getting yanked home with a partial tank.
+    // Rescue plans handle their own return-to-hub step, so ships mid-rescue
+    // aren't double-routed.
+    const hubReturnWarp = cfg.hubReturnWarp ?? 100;
     for (const s of ships) {
-      if (s.primary) continue; // primary manages its own routing
-      if (!ceo) break;
+      if (!ceo && !s.primary) break;
       if (['hauler', 'trader-light'].includes(shipKind(s.name)) === false) continue;
       if (s.active === true) continue;
       if (shipInAnyPlan(s.name)) continue;
       if (s.warpPower == null) continue;
-      if (s.warpPower >= minDispatch) continue;      // fine — will be dispatched normally
-      if (s.warpPower < critWarp) continue;          // truly stranded — field rescue handles it
+      if (s.warpPower > hubReturnWarp) continue;    // still has fuel — keep trading
+      if (s.warpPower < critWarp) continue;         // truly stranded — field rescue handles it
       if (s.sector != null && megaportSet.has(s.sector)) continue; // already at a megaport
+      // Skip the nag when no stockpile probe is available to top the ship
+      // up on arrival — sending it home just to sit idle has no value.
+      if (!_stockpileReadyAtHub) continue;
       const key = `route-to-hub:${s.name}`;
       if (canAct(key, cfg.refuelCooldownSec * 1000)) {
         pushInteractive({
@@ -910,13 +949,17 @@ const decide = async (snapshot) => {
       && (p.warpPower ?? 0) > 0
       && p.sector != null && megaportSet.has(p.sector) // probe must be at a megaport too
     );
+    // Hub top-up includes primary too — its warpMax (e.g. 1600 on a Kestrel
+    // Courier) means it often needs multiple probes to fill after a rescue.
     for (const s of ships) {
-      if (s.primary) continue;
-      if (!ceo) break;
+      if (!ceo && !s.primary) break;
       if (['hauler', 'trader-light'].includes(shipKind(s.name)) === false) continue;
       if (s.active === true) continue;
       if (shipInAnyPlan(s.name)) continue;
-      if (s.warpPower == null || s.warpPower >= minDispatch) continue;
+      if (s.warpPower == null) continue;
+      // Primary fills to its hull max (could be 1600); haulers stop at minDispatch.
+      const topUpCeiling = s.primary ? Math.max(minDispatch, (s.warpMax ?? minDispatch) - 50) : minDispatch;
+      if (s.warpPower >= topUpCeiling) continue;
       if (s.sector == null || !megaportSet.has(s.sector)) continue; // not at megaport yet
       const probe = availableStockpile.shift();
       if (!probe) break; // out of stockpile — next tick after buy
@@ -987,6 +1030,7 @@ const decide = async (snapshot) => {
     const replaceCandidates = ships.filter((s) =>
       !s.primary
       && shipKind(s.name) === 'probe'
+      && !isStockpileProbe(s.name) // stockpile probes use the simpler sell-stockpile path
       && s.warpPower != null && s.warpPower <= SCRAP_WARP_CEILING
       && s.active !== true
       && !hasPlan(s.name)
@@ -1080,6 +1124,7 @@ const decide = async (snapshot) => {
   const idleProbes = corpShips.filter((s) =>
     s.active === false
     && shipKind(s.name) === 'probe'
+    && !isStockpileProbe(s.name) // stockpile probes stay idle at hub on standby
     && s.warpPower != null
     && s.warpPower >= PROBE_MIN_DISPATCH_WARP
   );
@@ -1154,34 +1199,72 @@ const decide = async (snapshot) => {
   // semantics (at-hub-and-fundable).
   const needsFunding = fundableAtHub;
 
-  // Coordinated trade: if primary + ≥1 idle hauler all need dispatching at the
-  // same time, collapse N individual prompts into one. The agent calls
-  // start_task for each named ship in a single game-chat message — faster than
-  // N throttled ticks and avoids mid-dispatch state drift. Individual dispatch
-  // sections below skip ships whose cooldown key was already marked here.
-  if (cfg.enabled.trade && cfg.enabled.primary && !cfg.troubleMaker && !skipCorpWork && ceo && slotBudget > 0) {
-    const primaryNeedsTrade = primaryShip
-      && !primaryHasTask
+  // primaryHoldForRefuel + helpers are computed earlier (pre hub-routing).
+
+  // Fleet-wide coordinated trade. One prompt tells the agent to run every
+  // idle ship on a fedspace trade loop until it runs out of warp. We fire it
+  // whenever at least one non-probe ship is trade-ready (primary or hauler),
+  // gated by a single fleet cooldown. Replaces the old
+  // coordinated+per-hauler+per-primary dispatch blocks — far simpler and
+  // avoids per-ship cooldown juggling.
+  //
+  // Still respects:
+  //   - !troubleMaker (a troublemaker primary runs its own prompt below)
+  //   - skipCorpWork (non-CEO can't command corp ships)
+  //   - primaryHoldForRefuel (primary docked with partial warp gets topped up
+  //     first; it's just skipped from this dispatch — haulers still trade)
+  //   - isUnderfunded haulers (get a fund prompt instead)
+  if (cfg.enabled.trade && !cfg.troubleMaker && !skipCorpWork && ceo && slotBudget > 0) {
+    const dispatchMin = cfg.dispatchMinWarp ?? cfg.minWarp ?? 200;
+    // Use primary.active (not primaryHasTask) as the in-progress signal.
+    // The DOM's "WORKING" task entries linger after the agent actually
+    // stops — when a trade loop wraps up and the agent goes "fleet's idle
+    // at the port", the task can still show WORKING for minutes. Trusting
+    // the per-ship active flag plus the 90s cooldown lets us re-prompt a
+    // genuinely-idle primary without spamming an actively-trading one.
+    const primaryReady = primaryShip
+      && primaryShip.active !== true
       && !probeReplaceRecent
       && primaryShip.warpPower != null
-      && primaryShip.warpPower >= (cfg.dispatchMinWarp ?? cfg.minWarp)
+      && primaryShip.warpPower >= dispatchMin
       && !hasPlan(primaryShip.name)
-      && canAct('primary:trade', cfg.primaryDispatchCooldownSec * 1000);
-    if (primaryNeedsTrade) {
-      const activeTrades = activeCorp.filter((s) => ['hauler', 'trader-light'].includes(shipKind(s.name))).length;
-      const maxToCoord = Math.max(0, (cfg.tradeSlots ?? 2) - activeTrades);
-      const haulersToCoord = idleHaulers
-        .filter((h) => !isUnderfunded(h) && !hasPlan(h.name) && canAct(`trade:${h.name}`, cooldownMs))
-        .slice(0, maxToCoord);
-      if (haulersToCoord.length >= 1) {
-        const allNames = [primaryShip.name, ...haulersToCoord.map((h) => h.name)];
-        const coordKey = `trade:coordinated:${[...allNames].sort().join(':')}`;
-        if (canAct(coordKey, cooldownMs)) {
-          if (pushTaskDecision({ key: coordKey, ship: primaryShip.name, text: coordinatedTradePrompt(allNames) })) {
-            state.lastDecisionAt.set('primary:trade', _nowMs);
-            state.lastDecisionAt.set(coordKey, _nowMs);
-            for (const h of haulersToCoord) state.lastDecisionAt.set(`trade:${h.name}`, _nowMs);
-          }
+      && !primaryHoldForRefuel;
+    const haulersReady = idleHaulers.filter((h) => !isUnderfunded(h) && !hasPlan(h.name));
+    if (primaryReady || haulersReady.length > 0) {
+      const fleetKey = 'fleet:trade';
+      // Shorter cooldown than primaryDispatchCooldownSec (300s) — the fleet
+      // prompt is idempotent ("trade until out of fuel") and an idle fleet
+      // should be re-prompted within a tick or two of finishing, not 5
+      // minutes later. Active ships fail the readiness check above, so
+      // there's no flood risk while trading is actually happening.
+      const fleetCooldownMs = (cfg.fleetTradeCooldownSec ?? 90) * 1000;
+      if (canAct(fleetKey, fleetCooldownMs)) {
+        const dispatchShip = primaryReady ? primaryShip.name : haulersReady[0].name;
+        const idleNames = [
+          ...(primaryReady ? [primaryShip.name] : []),
+          ...haulersReady.map((h) => h.name)
+        ];
+        if (pushTaskDecision({ key: fleetKey, ship: dispatchShip, text: coordinatedTradePrompt() })) {
+          state.lastDecisionAt.set(fleetKey, _nowMs);
+          // Mark per-ship keys so legacy paths don't double-fire.
+          if (primaryReady) state.lastDecisionAt.set('primary:trade', _nowMs);
+          for (const h of haulersReady) state.lastDecisionAt.set(`trade:${h.name}`, _nowMs);
+          appendLog({
+            type: 'event',
+            intelType: 'fleet-trade-dispatch',
+            ship: dispatchShip,
+            snippet: `fleet idle/ready — dispatching trade to ${idleNames.join(', ')}`
+          });
+        }
+      }
+    }
+    // Still fire fund prompts for haulers that can't afford a trade yet.
+    for (const hauler of idleHaulers) {
+      if (!isUnderfunded(hauler) || hasPlan(hauler.name)) continue;
+      if (fundableAtHub(hauler)) {
+        const key = `fund:${hauler.name}`;
+        if (canAct(key, cfg.refuelCooldownSec * 1000)) {
+          pushInteractive({ key, ship: hauler.name, text: shipFundPrompt(hauler.name, hauler.credits, fundingFloor) });
         }
       }
     }
@@ -1238,50 +1321,11 @@ const decide = async (snapshot) => {
     }
   }
 
-  // Fill up to tradeSlots with haulers on safe trade loops.
-  const tradeTarget = cfg.tradeSlots ?? 2;
-  const activeTradeCount = activeCorp.filter((s) => ['hauler', 'trader-light'].includes(shipKind(s.name))).length;
-  let tradesSent = activeTradeCount;
-
-  for (const hauler of idleHaulers) {
-    if (skipCorpWork) break;
-    if (tradesSent >= tradeTarget) break;
-    if (remainingSlots <= 0) break;
-    if (!cfg.enabled.trade) break;
-    if (hasPlan(hauler.name)) continue;
-    // NEVER dispatch trade to an underfunded hauler — the agent just replies
-    // "still waiting for startup credits". If the hauler is at the hub and
-    // the primary can fund it, fire the fund prompt; otherwise skip silently
-    // (primary will reach the hub eventually, or the user can intervene).
-    if (isUnderfunded(hauler)) {
-      if (fundableAtHub(hauler)) {
-        const key = `fund:${hauler.name}`;
-        if (canAct(key, cfg.refuelCooldownSec * 1000)) {
-          pushInteractive({ key, ship: hauler.name, text: shipFundPrompt(hauler.name, hauler.credits, fundingFloor) });
-        }
-      } else {
-        const key = `underfunded:${hauler.name}`;
-        if (canAct(key, 5 * 60_000)) {
-          appendLog({
-            type: 'event',
-            intelType: 'hauler-underfunded',
-            ship: hauler.name,
-            credits: hauler.credits,
-            sector: hauler.sector,
-            snippet: `${hauler.name} has ${hauler.credits} credits (below ${fundingFloor}); not at hub or primary unavailable — deferring trade dispatch.`
-          });
-          state.lastDecisionAt.set(key, Date.now());
-        }
-      }
-      continue;
-    }
-    const key = `trade:${hauler.name}`;
-    if (!canAct(key, cooldownMs)) continue;
-    if (pushTaskDecision({ key, ship: hauler.name, text: haulerTradePrompt(hauler.name) })) {
-      remainingSlots -= 1;
-      tradesSent += 1;
-    }
-  }
+  // Per-hauler trade dispatch removed — the fleet-wide coordinated trade
+  // block above handles every idle hauler in a single prompt. Underfunded
+  // haulers get a fund prompt from the same block. Any hauler that can't
+  // currently be funded at the hub is left alone and picked up later once
+  // the primary is co-located.
 
   // Bank excess credits only when ships are leaving federation space.
   // Destruction drops whatever a ship is carrying, so banking is protection
@@ -1382,23 +1426,23 @@ const decide = async (snapshot) => {
       }
     }
 
+    // Primary trade dispatch happens inside the fleet-wide trade block at
+    // the top of decide(); only troublemaker mode still needs a solo primary
+    // prompt because its directive leaves fedspace and can't be packaged
+    // into the fleet-trade wording.
     if (
+      cfg.troubleMaker &&
       primaryShip &&
       !primaryHasTask &&
       !probeReplaceRecent &&
       primaryShip.warpPower != null &&
-      // Use dispatchMinWarp (~200) not minWarp (~50): at 50 warp the primary
-      // could start a trade loop and strand itself mid-hop before returning
-      // to refuel. 200 gives comfortable round-trip headroom.
       primaryShip.warpPower >= (cfg.dispatchMinWarp ?? cfg.minWarp) &&
-      !hasPlan(primaryShip.name)
+      !hasPlan(primaryShip.name) &&
+      !primaryHoldForRefuel
     ) {
-      const key = cfg.troubleMaker ? 'primary:troublemaker' : 'primary:trade';
+      const key = 'primary:troublemaker';
       if (canAct(key, cfg.primaryDispatchCooldownSec * 1000)) {
-        const text = cfg.troubleMaker
-          ? primaryTroubleMakerPrompt(primaryShip.name)
-          : primaryTradePrompt(primaryShip.name);
-        pushTaskDecision({ key, ship: primaryShip.name, text });
+        pushTaskDecision({ key, ship: primaryShip.name, text: primaryTroubleMakerPrompt(primaryShip.name) });
       }
     }
   }
@@ -1493,11 +1537,8 @@ const runTick = async () => {
     }
     if (snapshot?.extracted?.gameDisconnected) {
       const click = await clickGameReconnect().catch((e) => ({ ok: false, error: e.message }));
-      // Give the game a beat to tear down the modal and render whatever comes next
-      // (fresh HUD if the session survived, or a login form if it didn't), then
-      // run loginIfNeeded — it's a no-op when we're already authed, and a full
-      // login + character-select flow otherwise.
-      await new Promise((r) => setTimeout(r, 1500));
+      // clickGameReconnect waits for the page reload to complete (domcontentloaded)
+      // before returning, so loginIfNeeded runs after the new page is ready.
       const login = await loginIfNeeded().catch((e) => ({ ok: false, error: e.message }));
       appendLog({
         type: 'event',
@@ -1801,13 +1842,20 @@ const runTick = async () => {
       corpGuardedDecisions.push(d);
     }
 
+    // Fuel-delivery plans are critical: deferring one means a ship stays
+    // stranded for a full polling interval. They bypass the per-tick cap
+    // so all stranded ships get rescued in the same tick they become
+    // candidates. The 12s inter-prompt delay still paces them for the
+    // agent's benefit.
+    const isCriticalRescue = (d) => d.createPlan?.goal === 'fuel-delivery';
+
     for (const d of corpGuardedDecisions) {
       // Pace consecutive prompts: first send immediately, subsequent ones
       // wait for the agent to finish the previous command.
       if (promptsSent > 0 && interPromptDelayMs > 0) {
         await new Promise((r) => setTimeout(r, interPromptDelayMs));
       }
-      if (promptsSent >= maxPerTick) {
+      if (promptsSent >= maxPerTick && !isCriticalRescue(d)) {
         appendLog({ type: 'decision', key: d.key, ship: d.ship, text: '(deferred — hit per-tick cap)', skipped: true });
         continue;
       }
@@ -1938,6 +1986,27 @@ export const stopAutopilot = ({ reason = null } = {}) => {
   state.stopReason = reason;
   appendLog({ type: 'stop', reason });
   return { ok: true, reason };
+};
+
+/**
+ * Dry-run helper: runs decide() against a snapshot without firing prompts.
+ * Used by the /api/autopilot/dry-run endpoint to preview what the autopilot
+ * would do before enabling it — critical because the real tick loop pushes
+ * prompts into the live game chat.
+ */
+export const dryRunDecide = async (snapshot, configOverride = {}) => {
+  const prevConfig = state.config;
+  const prevPrevWarp = state.prevWarp;
+  const prevLastDecision = state.lastDecisionAt;
+  // Fresh in-memory maps so cooldowns don't silently suppress decisions.
+  state.config = { ...DEFAULTS, ...(prevConfig || {}), ...configOverride };
+  state.prevWarp = new Map();
+  state.lastDecisionAt = new Map();
+  const decisions = await decide(snapshot);
+  state.config = prevConfig;
+  state.prevWarp = prevPrevWarp;
+  state.lastDecisionAt = prevLastDecision;
+  return decisions;
 };
 
 export const getAutopilotState = () => ({

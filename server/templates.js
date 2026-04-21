@@ -42,30 +42,6 @@ const builtins = [
     }
   },
   {
-    name: 'Pure exploration (Kestrel)',
-    spec: {
-      goal: 'Explore unvisited sectors at the periphery of my known map. Flee from any combat. Return to a megaport to recharge warp before it hits 30.',
-      guardrails: ['Flee all combat', 'Do not engage garrisons'],
-      intervalSec: 30,
-      nudgeAfterIdleSec: 270,
-      abortWhen: [{ metric: 'warpPower', op: '<', value: 30 }]
-    }
-  },
-  {
-    name: 'Kestrel: federation trade loop',
-    spec: {
-      goal: 'Run a short NS trade loop entirely within federation space. No border or neutral sectors. Refuel at a megaport when warp gets low.',
-      guardrails: [
-        'Federation space only',
-        'Prioritize NS routes',
-        'Refuel before warp drops below 100'
-      ],
-      intervalSec: 30,
-      nudgeAfterIdleSec: 270,
-      abortWhen: [{ metric: 'warpPower', op: '<', value: 80 }]
-    }
-  },
-  {
     name: 'Probe: autonomous exploration',
     spec: {
       // Goal mirrors autopilot's explorer prompt (server/autopilot.js
@@ -99,18 +75,26 @@ const builtins = [
     }
   },
   {
-    name: 'Light Hauler: short trade loop',
+    name: 'Fleet: perpetual trade + probe refuel loop',
     spec: {
-      goal: 'Start an autonomous trade task on this hauler. Find a 2-3 hop NS loop in federation space or sectors directly adjacent to it, and run it. Steer if port depletion drops margin below 20 cr/unit.',
+      goal: `Run all haulers and this ship on independent NS trade loops in federation space. Route choices are your own. Trade until the fleet runs low on warp power. Then:
+1. Move this ship to sector 1413 (home megaport).
+2. Use probes to refuel every grounded hauler via the stockpile system.
+3. Any probe that runs out of fuel: sell it with sell_ship, then buy a fresh probe from the megaport at sector 1413.
+4. Once all haulers are fueled, resume trading with the full fleet including this ship.
+Repeat this cycle forever.`,
       guardrails: [
-        'Federation space or directly adjacent only',
-        'Prioritize NS routes',
-        'Refuel before warp drops below 100',
-        'Flee any combat'
+        'All ships trade in federation space only',
+        'Haulers never divert to megaports for fuel — probes handle all refueling',
+        'Refuel hub is always sector 1413',
+        'Depleted probes are sold and replaced at sector 1413 before resuming',
+        'Flee all combat',
+        'No garrisons or toll gates'
       ],
       intervalSec: 30,
       nudgeAfterIdleSec: 270,
-      abortWhen: []
+      abortWhen: [],
+      stopWhen: []
     }
   },
   {

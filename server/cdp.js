@@ -374,6 +374,8 @@ export const clickGameReconnect = async () => {
   } catch (err) {
     return { ok: false, error: err.message };
   }
+  // Register navigation listener BEFORE clicking to avoid missing the reload event
+  const navPromise = page.waitForNavigation({ waitUntil: 'domcontentloaded', timeout: 20000 }).catch(() => {});
   const clicked = await page.evaluate(() => {
     const btn = Array.from(document.querySelectorAll('button'))
       .find((b) => /^\s*RECONNECT\s*$/i.test(b.innerText || ''));
@@ -382,6 +384,11 @@ export const clickGameReconnect = async () => {
     btn.click();
     return { ok: true };
   });
+  if (clicked.ok) {
+    // The button triggers window.location.reload() — wait for the page to finish loading
+    // before returning so callers can immediately run loginIfNeeded()
+    await navPromise;
+  }
   return clicked;
 };
 
@@ -478,6 +485,19 @@ export const selectCharacterIfNeeded = async (name) => {
  */
 export const loginIfNeeded = async () => {
   const page = await withPage();
+  // After a RECONNECT-triggered reload, domcontentloaded fires before React
+  // has mounted any of the auth UIs. Without this wait, we return
+  // 'already-authed' on a page that hasn't drawn the login form OR the
+  // character-select dialog yet — so the automation proceeds as if nothing
+  // needed doing. Wait up to 8s for any of the three known post-load UIs.
+  await page.waitForFunction(() => {
+    if (document.querySelector('input[type="email"]')) return true;
+    if (/Select Character/i.test(document.body?.innerText || '')) return true;
+    // Main HUD fingerprint — credits pill only renders once authed and in-game.
+    if (document.querySelector('[data-tutorial="credits"]')) return true;
+    return false;
+  }, null, { timeout: 8000 }).catch(() => {});
+
   const emailInput = page.locator('input[data-slot="input"][type="email"], input[type="email"]').first();
   const hasEmailField = await emailInput.count() && await emailInput.isVisible().catch(() => false);
 

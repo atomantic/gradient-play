@@ -163,10 +163,11 @@ export const buildRefuelPlan = (ship, { creditsForRefuel = 1000, megaports = [],
  * elsewhere mid-delivery. Target is in context.blockedShips so the fuel
  * guard doesn't re-fire on it while this plan is live.
  */
-export const buildRefuelerRescuePlan = (target, donor, { transferAmt = 300 } = {}) => {
+export const buildRefuelerRescuePlan = (target, donor, { transferAmt = 300, hubSector = 1413, megaports = [305, 472, 1413] } = {}) => {
   const targetName = target.name;
   const donorName = donor.name;
   const targetSector = target.sector;
+  const megaportSet = new Set(megaports);
   // Only include the sector hint when we actually know it — if the DOM
   // scrape couldn't read the primary's sector, the agent can resolve the
   // location itself (corporation_info / my_status). Baking "@null" into
@@ -202,6 +203,24 @@ export const buildRefuelerRescuePlan = (target, donor, { transferAmt = 300 } = {
       // Any detectable positive delta on the target is enough — the agent
       // already did the work, the UI just hasn't settled.
       return t.warpPower > baseline + 10;
+    }
+  }, {
+    // After the refuel lands the target still has partial warp — send it
+    // home to 1413 for a full top-up from the remaining stockpile. Without
+    // this, the next tick's hub-routing handles haulers fine but a primary
+    // that's just been rescued could get trade-dispatched instead once warp
+    // crossed dispatchMinWarp. The plan keeps target blocked until it docks.
+    name: 'return-to-hub',
+    prompt: `${targetName}: plot_course to sector ${hubSector} and dock for refuel. execute immediately, no confirmation.`,
+    nagMs: 120_000,
+    maxMs: 12 * 60_000,
+    isDone: (snap) => {
+      const t = (snap?.extracted?.ships || []).find((s) => s.name === targetName);
+      if (t && t.sector != null && megaportSet.has(t.sector)) return true;
+      const msgs = snap?.extracted?.lastMessages || [];
+      const recent = msgs.slice(-6).join(' ').toLowerCase();
+      const hubStr = String(hubSector);
+      return new RegExp(`(?:already\\s+(?:docked|at)|docked\\s+(?:at|in)).*${hubStr}|${hubStr}.*(?:docked|arrived)`, 'i').test(recent);
     }
   }];
 
