@@ -184,8 +184,13 @@ const primaryTroubleMakerPrompt = (primary) => {
 // per-ship trade dispatches we used to fire (primaryTradePrompt /
 // haulerTradePrompt), which means one throttle slot instead of N and no
 // mid-tick drift between ships. standingOrders appended for bank/toll policy.
-const coordinatedTradePrompt = () => {
-  const base = `run all ships (including my primary) on coordinated trade loops in ${tradeZonePhrase()} until they are out of warp fuel.`;
+const coordinatedTradePrompt = (idleNames = []) => {
+  const who = idleNames.length === 0
+    ? 'any non-probe ship without an active task'
+    : idleNames.length === 1
+      ? idleNames[0]
+      : idleNames.join(', ');
+  const base = `${who}: start a trade loop in ${tradeZonePhrase()}, run until warp is exhausted. do NOT touch any ship that already has a working task — leave those loops running.`;
   const discipline = outsideFedspaceDiscipline();
   return discipline ? `${base} ${discipline}.` : base;
 };
@@ -1284,7 +1289,7 @@ const decide = async (snapshot) => {
           ...(primaryReady ? [primaryShip.name] : []),
           ...haulersReady.map((h) => h.name)
         ];
-        if (pushTaskDecision({ key: fleetKey, ship: dispatchShip, text: coordinatedTradePrompt() })) {
+        if (pushTaskDecision({ key: fleetKey, ship: dispatchShip, text: coordinatedTradePrompt(idleNames) })) {
           state.lastDecisionAt.set(fleetKey, _nowMs);
           // Mark per-ship keys so legacy paths don't double-fire.
           if (primaryReady) state.lastDecisionAt.set('primary:trade', _nowMs);
