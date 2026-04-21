@@ -8,6 +8,8 @@ const DEFAULT_CONFIG = {
   refuelCooldownSec: 180,
   rescueCooldownSec: 90,
   safeMode: true,
+  fedspaceBorderHops: 0,
+  allowedSectors: [],
   isCeo: false,
   troubleMaker: false,
   maxDecisionsPerTick: 2,
@@ -344,6 +346,36 @@ export const AutopilotPanel = () => {
           <div className="text-[10px] text-amber-400/70 -mt-0.5">
             Safe mode: non-probe ships stay in federation space. Probes may venture further.
           </div>
+          {config.safeMode !== false ? (
+            <div className="flex flex-wrap items-center gap-x-3 gap-y-1 pt-1">
+              <label className="flex items-center gap-1">
+                <span className="text-slate-400">Border hops OK</span>
+                <input type="number" min={0} max={20}
+                  value={config.fedspaceBorderHops ?? 0}
+                  onChange={(e) => setConfig({ ...config, fedspaceBorderHops: Math.max(0, Number(e.target.value) || 0) })}
+                  className="bg-slate-950 border border-slate-800 rounded px-1 py-0.5 w-14" />
+              </label>
+              <label className="flex items-center gap-1 flex-1 min-w-[180px]">
+                <span className="text-slate-400">Allowed sectors</span>
+                <input type="text"
+                  placeholder="e.g. 4152, 3124"
+                  value={(config.allowedSectors ?? []).join(', ')}
+                  onChange={(e) => setConfig({
+                    ...config,
+                    allowedSectors: e.target.value
+                      .split(/[,\s]+/)
+                      .map((s) => parseInt(s, 10))
+                      .filter((n) => Number.isFinite(n) && n > 0)
+                  })}
+                  className="bg-slate-950 border border-slate-800 rounded px-1 py-0.5 flex-1 min-w-[120px]" />
+              </label>
+            </div>
+          ) : null}
+          {config.safeMode !== false ? (
+            <div className="text-[10px] text-amber-400/60 -mt-0.5">
+              Exceptions to safe mode. "Border hops" lets ships travel N hops past the fedspace edge; "allowed sectors" whitelists specific neutral sectors (comma-separated). Ships still flee back to fedspace on trouble.
+            </div>
+          ) : null}
           <div className="text-[10px] text-rose-400/70 -mt-0.5">
             CEO: autopilot manages every corp ship (shared task slots). Off = primary ship only — prevents colliding with other corp members' dispatches.
           </div>

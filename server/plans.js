@@ -73,7 +73,7 @@ const isProbe = (ship) => /PROBE|EXPLORER|SCAVENGER|SALVAGER|SCOUT|PATHFINDER/i.
  *   3. recharge-warp     — top up warp
  *   4. resume            — put ship back on its role-appropriate task
  */
-export const buildRefuelPlan = (ship, { creditsForRefuel = 1000, megaports = [], homeHub = 305 } = {}) => {
+export const buildRefuelPlan = (ship, { creditsForRefuel = 1000, megaports = [], homeHub = 305, tradeZone = 'fedspace' } = {}) => {
   const shipCredits = ship.credits ?? 0;
   const needsCredits = shipCredits < creditsForRefuel;
   const initialWarp = ship.warpPower ?? 0;
@@ -142,7 +142,7 @@ export const buildRefuelPlan = (ship, { creditsForRefuel = 1000, megaports = [],
     name: 'resume',
     prompt: isProbe(ship)
       ? `${ship.name} is fueled. resume exploration/salvage — 40 hop radius, flee combat, deposit credits at megaports.`
-      : `${ship.name} is fueled. resume trading in fedspace, route is your call.`,
+      : `${ship.name} is fueled. resume trading in ${tradeZone}, route is your call.`,
     nagMs: 120_000,
     maxMs: 3 * 60_000,
     isDone: (_snap, s) => s.active === true
@@ -407,7 +407,7 @@ const EXEC_NOW = ' execute immediately, no confirmation needed.';
  * later via the sell+rebuy workflow when the primary docks. Refuelers stay
  * in the rally (they come home to refuel the fleet, that's their role).
  */
-export const buildFleetRallyPlan = (ships = [], { keepCredits = 1000, megaports = [305, 472, 1413], homeHub = 305, resume = true } = {}) => {
+export const buildFleetRallyPlan = (ships = [], { keepCredits = 1000, megaports = [305, 472, 1413], homeHub = 305, resume = true, tradeZone = 'fedspace' } = {}) => {
   const opShips = ships.filter((s) => !isProbe(s));
   const names = opShips.map((s) => s.name).filter(Boolean);
   const fleetLabel = names.length ? names.join(', ') : 'every non-probe ship';
@@ -545,7 +545,7 @@ export const buildFleetRallyPlan = (ships = [], { keepCredits = 1000, megaports 
   // the ships that came home to rally.
   if (resume) steps.push({
     name: 'resume',
-    prompt: `dispatch non-probe ships: haulers/primary trade in fedspace, routes are their call. refueler: park. leave any probe/explorer/scavenger alone — they stay on their current task in the field.${EXEC_NOW}`,
+    prompt: `dispatch non-probe ships: haulers/primary trade in ${tradeZone}, routes are their call. refueler: park. leave any probe/explorer/scavenger alone — they stay on their current task in the field.${EXEC_NOW}`,
     nagMs: 120_000,
     maxMs: 5 * 60_000,
     isDone: (snap) => {

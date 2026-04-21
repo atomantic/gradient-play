@@ -11,6 +11,38 @@ const megaportList = () => (state.config?.megaports || DEFAULT_MEGAPORTS).join('
 const megaportSectors = () => state.config?.megaports || DEFAULT_MEGAPORTS;
 const homeHub = () => state.config?.homeHub ?? DEFAULTS.homeHub;
 
+/**
+ * Phrase describing where non-probe ships may trade. Starts from fedspace
+ * and extends based on two config knobs:
+ *   fedspaceBorderHops — how many hops past the fedspace border are OK
+ *   allowedSectors     — explicit sector IDs always permitted (e.g. [4152, 3124])
+ * Returns a terse phrase suitable for dropping into dispatch prompts.
+ */
+const tradeZonePhrase = (cfg = state.config || {}) => {
+  const hops = Math.max(0, Number(cfg.fedspaceBorderHops) || 0);
+  const whitelist = Array.isArray(cfg.allowedSectors)
+    ? cfg.allowedSectors.filter((n) => Number.isFinite(n))
+    : [];
+  if (hops === 0 && whitelist.length === 0) return 'fedspace';
+  let phrase = hops > 0 ? `fedspace +${hops} hop${hops === 1 ? '' : 's'}` : 'fedspace';
+  if (whitelist.length) phrase += ` or sectors ${whitelist.join('/')}`;
+  return phrase;
+};
+
+/**
+ * When outside-fedspace travel is permitted (border hops or whitelisted
+ * sectors), tell the agent to opportunistically grab salvage and retreat.
+ * Returns an empty string when ships are strictly fedspace-bound.
+ */
+const outsideFedspaceDiscipline = (cfg = state.config || {}) => {
+  const hops = Math.max(0, Number(cfg.fedspaceBorderHops) || 0);
+  const whitelist = Array.isArray(cfg.allowedSectors)
+    ? cfg.allowedSectors.filter((n) => Number.isFinite(n))
+    : [];
+  if (hops === 0 && whitelist.length === 0) return '';
+  return 'outside fedspace: check for salvage each sector — if any, salvage_collect then flee back to fedspace; if none, trade as usual';
+};
+
 
 /**
  * Standing policy clause appended to dispatch prompts so the agent knows how
@@ -26,9 +58,12 @@ const standingOrders = (shipName = '', { isProbe = false, tradeFallback = false 
   const cfg = state.config || {};
   const parts = [];
   if (cfg.safeMode && !isProbe) {
+    const zone = tradeZonePhrase(cfg);
     parts.push(tradeFallback
-      ? `fedspace first; +1-2 border hops OK only if no fedspace buyer accepts the cargo; keep warp to return to a megaport (${megaportList()})`
-      : 'fedspace');
+      ? `${zone}; if no fedspace buyer accepts the cargo, +1-2 border hops OK; keep warp to return to a megaport (${megaportList()})`
+      : zone);
+    const discipline = outsideFedspaceDiscipline(cfg);
+    if (discipline) parts.push(discipline);
   }
   parts.push('avoid tolls');
   if (isProbe) {
@@ -149,8 +184,11 @@ const primaryTroubleMakerPrompt = (primary) => {
 // per-ship trade dispatches we used to fire (primaryTradePrompt /
 // haulerTradePrompt), which means one throttle slot instead of N and no
 // mid-tick drift between ships. standingOrders appended for bank/toll policy.
-const coordinatedTradePrompt = () =>
-  'run all ships (including my primary) on coordinated fedspace-only trade loops until they are out of warp fuel.';
+const coordinatedTradePrompt = () => {
+  const base = `run all ships (including my primary) on coordinated trade loops in ${tradeZonePhrase()} until they are out of warp fuel.`;
+  const discipline = outsideFedspaceDiscipline();
+  return discipline ? `${base} ${discipline}.` : base;
+};
 
 // Per-user config overrides loaded from data/config.json (git-ignored). This
 // is how individual corp members set their own isCeo flag, homeHub, etc.
@@ -220,6 +258,8 @@ const DEFAULTS = {
   shortenProbeNames: true,          // auto-rename probes whose name exceeds probeNameMaxChars
   probeNameMaxChars: 22,            // fresh purchases sometimes arrive with long date-stamped names; trim them
   safeMode: true,                  // restrict non-probe ships to federation space
+  fedspaceBorderHops: 0,           // when safeMode: how many hops past the fedspace border ships may travel (0 = strict fedspace)
+  allowedSectors: [],              // when safeMode: explicit sectors permitted outside fedspace (e.g. [4152, 3124])
   // CEO mode: autopilot dispatches corp ships. Default off so cloned checkouts
   // don't stomp on a corp's task slots. Override per-user via data/config.json.
   isCeo: false,
@@ -2042,7 +2082,8 @@ const buildLiveRallyPlan = async ({ resume }) => {
     keepCredits: state.config?.onHandFloor ?? 1000,
     megaports: megaportSectors(),
     homeHub: homeHub(),
-    resume
+    resume,
+    tradeZone: tradeZonePhrase()
   });
   return { plan, ships };
 };
