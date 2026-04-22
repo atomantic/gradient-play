@@ -1,5 +1,5 @@
 import React, { useRef, useState } from 'react';
-import { Fuel, MapPin, Banknote, Zap, Scale, Briefcase, Rocket, Home } from 'lucide-react';
+import { Fuel, MapPin, Banknote, Zap, Scale, Briefcase, Rocket, Home, Radar } from 'lucide-react';
 
 const STEPS = [
   { name: 'fuel-share',         label: 'Fuel Share',      icon: Fuel,      hint: 'transfer_warp between non-probe ships until everyone has enough to move' },
@@ -90,10 +90,21 @@ export const FleetActions = () => {
         {busy === 'home-base' ? 'sending…' : pending === 'home-base' ? 'Confirm park at hub?' : 'Everything but Dispatch (park at hub)'}
       </button>
 
+      <div className="pt-1 border-t border-slate-800" />
+
+      <button onClick={() => post('salvage-scan', '/api/fleet/salvage-scan')}
+        disabled={busy != null}
+        title="Send the primary ship on a 10-hop salvage sweep — find non-empty containers, score by value/hop, salvage_collect each, repeat until the radius is clean. Probes only get credits; primary collects everything."
+        className="w-full px-3 py-2 rounded text-white text-sm flex items-center justify-center gap-2 bg-emerald-700 hover:bg-emerald-600 disabled:bg-slate-700">
+        <Radar className="w-4 h-4" />
+        {busy === 'salvage-scan' ? 'sending…' : 'Salvage Scan (primary, 10-hop sweep)'}
+      </button>
+
       {msg ? <div className="text-[11px] text-slate-400">{msg}</div> : null}
       <div className="text-[10px] text-slate-500">
         Step buttons fire a single prompt and stop — no plan, no nag. Run them in any order you like.
-        The two big buttons chain all steps as a managed plan (double-click to confirm).
+        The two big buttons chain all steps as a managed plan (double-click to confirm). Salvage Scan
+        dispatches the primary on an opportunistic loot sweep — fire & forget.
       </div>
     </div>
   );

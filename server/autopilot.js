@@ -2215,6 +2215,46 @@ export const startFleetRally = async (opts = {}) => {
  * immediately, no confirmation needed" suffix on each step prompt should
  * keep the agent from asking for confirmation in the first place.
  */
+/**
+ * Salvage scan loop dispatched at the primary ship. Probes can call
+ * salvage_collect but only pocket the credits portion (zero cargo holds);
+ * cargo + scrap stay in the container. The primary's hull (Kestrel /
+ * Wayfarer / Atlas / etc.) actually has cargo capacity, so it's the right
+ * tool for a real salvage sweep. Single one-shot dispatch — no plan, no
+ * nag, no cooldown. The autopilot's normal trade dispatch resumes when
+ * the primary becomes idle again.
+ */
+export const fireSalvageScan = async () => {
+  const snap = await freshSnapshot();
+  const ships = snap?.extracted?.ships || [];
+  const primary = ships.find((s) => s.primary === true);
+  if (!primary) return { ok: false, error: 'primary ship not found in snapshot' };
+  if (primary.active === true) return { ok: false, error: 'primary ship is mid-task — wait for it to dock before running a salvage scan' };
+  const prompt = `${primary.name}: SALVAGE SCAN LOOP — sweep the surrounding region for salvage and collect everything with value to your hold.
+SETUP:
+  - my_status → note current sector, cargo hold capacity, current cargo, on-hand credits
+  - local_map_region(max_hops=10, max_sectors=200) → map the search radius
+LOOP (repeat until no salvage remains in 10-hop radius or you run out of warp):
+  1. Scan the map result for sectors whose salvage array is non-empty
+  2. Score each candidate container = (estimated value to me) ÷ hops_away, where value = credits + (commodity units × spot price if I have hold space) + (scrap × 1 if I have hold space). Containers with credits-only are still positive.
+  3. Pick the highest-scoring container. plot_course → move → salvage_collect(salvage_id=<that container>)
+  4. If the destination sector has multiple containers, salvage_collect every one before leaving
+  5. Refresh: local_map_region(max_hops=10, max_sectors=200) again, return to step 1
+  6. If no salvage remains in the 10-hop radius: status.update "salvage zone clean" and either wait_in_idle_state a few turns (containers spawn from kills, regen is slow) or plot_course one hop in any direction to refresh the search radius — your call
+FUEL CHECK after every move:
+  - if warp_power <= 2 × turns_per_warp: plot_course nearest known megaport, recharge_warp_power, then resume the loop
+TERMINATE on stop_task or steer_task. Do NOT call finished — keep the loop alive between scans.`;
+  const send = await sendAssistantPrompt(prompt).catch((e) => ({ ok: false, error: e.message }));
+  appendLog({
+    type: 'decision',
+    key: 'salvage-scan',
+    ship: primary.name,
+    text: prompt,
+    send
+  });
+  return { ok: !!send.ok, ship: primary.name, send };
+};
+
 export const fireRallyStep = async (stepName) => {
   const denial = requireCeo('rally step');
   if (denial) return denial;

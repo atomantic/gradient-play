@@ -58,6 +58,39 @@ const builtins = [
     }
   },
   {
+    name: 'Primary: salvage scan loop',
+    spec: {
+      // Mirrors fireSalvageScan() in autopilot.js — same prompt body, but
+      // delivered as a recurring mission rather than a one-shot dispatch.
+      // Use this template if you want the salvage sweep to nag the agent
+      // on intervalSec instead of running purely on-demand from the UI.
+      // The primary ship collects everything (credits + cargo + scrap);
+      // probes can salvage_collect but only pocket the credits portion
+      // because they have 0 cargo holds.
+      goal: `SALVAGE SCAN LOOP — sweep the surrounding region for salvage and collect everything with value to your hold.
+SETUP: my_status (note cargo capacity, current cargo, on-hand credits), then local_map_region(max_hops=10, max_sectors=200).
+LOOP until the 10-hop radius is clean or you run low on warp:
+  1. Find sectors whose salvage array is non-empty.
+  2. Score each container = (estimated value to me) ÷ hops_away. Value = credits + (commodity units × spot price if I have hold space) + (scrap × 1 if I have hold space).
+  3. plot_course → move → salvage_collect(salvage_id=<best>). If multiple containers in the destination, collect them all before leaving.
+  4. Refresh local_map_region and repeat.
+  5. If radius is empty: status.update "salvage zone clean" and either wait_in_idle_state (containers regen slowly from kills) or plot_course one hop in any direction to refresh the search radius.
+FUEL: if warp <= 2 × turns_per_warp, plot_course nearest megaport, recharge_warp_power, resume.
+Do NOT call finished — keep looping.`,
+      guardrails: [
+        'Sweep only — do not engage combat for salvage; flee any aggressor',
+        'Avoid tolls and hostile garrisons',
+        'Refuel at the nearest megaport when warp is low; do not strand',
+        'salvage_collect every container in the current sector before moving on',
+        'Stop only on stop_task or steer_task'
+      ],
+      intervalSec: 30,
+      nudgeAfterIdleSec: 270,
+      abortWhen: [{ metric: 'warpPower', op: '<', value: 30 }],
+      stopWhen: []
+    }
+  },
+  {
     name: 'Probe: explore & salvage',
     spec: {
       goal: 'Explore unmapped sectors, and on every sector arrival check for salvage and claim it. Deposit credits at each megaport visit. Unless I list known salvage sectors in your guardrails, default to unmapped sectors.',

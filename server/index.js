@@ -22,7 +22,7 @@ import { connectGamePage, getGameSnapshot, sendAssistantPrompt, getConnectionSta
 import { createMission, listMissions, getMission, abortMission, untrackMission, subscribeMissionLog } from './missions.js';
 import { loadMissionTemplates, saveMissionTemplate, deleteMissionTemplate } from './templates.js';
 import { credentialsStatus, setCredentials, clearCredentials } from './credentials.js';
-import { startAutopilot, stopAutopilot, getAutopilotState, subscribeAutopilotLog, startFleetRally, fireRallyStep, dryRunDecide } from './autopilot.js';
+import { startAutopilot, stopAutopilot, getAutopilotState, subscribeAutopilotLog, startFleetRally, fireRallyStep, fireSalvageScan, dryRunDecide } from './autopilot.js';
 import { getIntel, addManualEvent, updateEvent as updateIntelEvent, deleteEvent, clearIntel, observe as intelObserve } from './intel.js';
 import { aiToolkit, adviseAutopilot, adviseWithStrategy } from './advisor.js';
 
@@ -209,6 +209,13 @@ app.post('/api/fleet/step', async (req, res) => {
   log('⚡', `Fleet step: ${step}`);
   const result = await fireRallyStep(step);
   log(result.ok ? '✅' : '⚠️', `Fleet step ${step} ${result.ok ? 'fired' : 'failed'}`, { error: result.error });
+  res.json(result);
+});
+
+app.post('/api/fleet/salvage-scan', async (_req, res) => {
+  log('🛰️', 'Salvage scan requested (primary)');
+  const result = await fireSalvageScan();
+  log(result.ok ? '✅' : '⚠️', `Salvage scan ${result.ok ? 'dispatched' : 'failed'}`, { ship: result.ship, error: result.error });
   res.json(result);
 });
 
