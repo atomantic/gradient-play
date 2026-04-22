@@ -251,7 +251,7 @@ const DEFAULTS = {
   probeStockpileMin: 10,           // when fuelled-probe count drops below this, fire a bulk buy
   probeStockpileMax: 15,           // bulk-buy ceiling — primary purchases (max-active) probes in one prompt
   primaryDispatchCooldownSec: 300,  // 5 min — tight enough to refill the local slot quickly when a task ends
-  fleetTradeCooldownSec: 90,        // re-prompt an idle fleet within ~90s of tasks completing; idempotent so no flood risk
+  fleetTradeCooldownSec: 240,       // re-prompt an idle fleet 4 min after dispatch; hysteresis below also requires 2 idle observations in a row
   hubReturnWarp: 100,               // below this fuel, pull ships back to the home hub for refuel
   // Both preferred-route overrides are deprecated — all trade prompts
   // (primary and corp haulers) are non-prescriptive now. Kept in DEFAULTS
@@ -1271,20 +1271,32 @@ const decide = async (snapshot) => {
   //   - isUnderfunded haulers (get a fund prompt instead)
   if (cfg.enabled.trade && !cfg.troubleMaker && !skipCorpWork && ceo && slotBudget > 0) {
     const dispatchMin = cfg.dispatchMinWarp ?? cfg.minWarp ?? 200;
-    // Use primary.active (not primaryHasTask) as the in-progress signal.
-    // The DOM's "WORKING" task entries linger after the agent actually
-    // stops — when a trade loop wraps up and the agent goes "fleet's idle
-    // at the port", the task can still show WORKING for minutes. Trusting
-    // the per-ship active flag plus the 90s cooldown lets us re-prompt a
-    // genuinely-idle primary without spamming an actively-trading one.
+    // Hysteresis: a ship must be idle in BOTH the current and previous
+    // snapshot to count as ready. The DOM's per-ship active flag flickers
+    // to false during normal task transitions (between trade legs), and
+    // a single tick of false-positive idle would re-fire the dispatch
+    // every cooldown window. Two consecutive idle observations means the
+    // ship has been idle for at least one poll interval (~60s) — enough
+    // to be confident the previous task actually finished.
+    const prevShips = state.prevSnapshot?.extracted?.ships || [];
+    const wasInactivePrev = (name) => {
+      const prev = prevShips.find((s) => s.name === name);
+      return prev != null && prev.active !== true;
+    };
     const primaryReady = primaryShip
-      && primaryShip.active !== true
+      && primaryShip.active === false
+      && wasInactivePrev(primaryShip.name)
+      && !primaryHasTask
       && !probeReplaceRecent
       && primaryShip.warpPower != null
       && primaryShip.warpPower >= dispatchMin
       && !hasPlan(primaryShip.name)
       && !primaryHoldForRefuel;
-    const haulersReady = idleHaulers.filter((h) => !isUnderfunded(h) && !hasPlan(h.name));
+    const haulersReady = idleHaulers.filter((h) =>
+      !isUnderfunded(h)
+      && !hasPlan(h.name)
+      && wasInactivePrev(h.name)
+    );
     if (primaryReady || haulersReady.length > 0) {
       const fleetKey = 'fleet:trade';
       // Shorter cooldown than primaryDispatchCooldownSec (300s) — the fleet
@@ -1585,6 +1597,7 @@ const runTick = async () => {
   if (!state.running) return;
   try {
     const snapshot = await getGameSnapshot();
+    state.prevSnapshot = state.lastSnapshot;
     state.lastSnapshot = snapshot;
     if (snapshot && snapshot.connected === false) {
       appendLog({ type: 'error', error: `cdp disconnected${snapshot.error ? ': ' + snapshot.error : ''} — will retry next tick` });
