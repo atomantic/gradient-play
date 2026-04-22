@@ -427,8 +427,14 @@ export const sendAssistantPrompt = async (text) => {
       return { ok: false, error: 'chat input not found' };
     }
     await input.loc.click();
-    await input.loc.fill('');
-    await input.loc.type(text, { delay: 6 });
+    // fill() sets the value in one operation (paste-like). type() walked
+    // each character through the keyboard, and `\n` chars in multi-line
+    // prompts (e.g. the FEDSPACE TRADING LOOP spec) were interpreted as
+    // Enter keypresses — splitting the prompt into multiple submitted
+    // messages. The chat input is a single-line <input>, so the browser's
+    // value setter silently strips remaining newlines on fill, leaving the
+    // prompt as one continuous string. Manual paste works the same way.
+    await input.loc.fill(text);
     await input.loc.press('Enter');
     lastSendEndedAt = Date.now();
     return { ok: true, via: 'enter', inputSelector: input.sel };
