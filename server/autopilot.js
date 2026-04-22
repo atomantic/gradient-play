@@ -190,9 +190,47 @@ const coordinatedTradePrompt = (idleNames = []) => {
     : idleNames.length === 1
       ? idleNames[0]
       : idleNames.join(', ');
-  const base = `${who}: start a trade loop in ${tradeZonePhrase()}, run until warp is exhausted. do NOT touch any ship that already has a working task — leave those loops running.`;
-  const discipline = outsideFedspaceDiscipline();
-  return discipline ? `${base} ${discipline}.` : base;
+  const cfg = state.config || {};
+  const allowedSectors = Array.isArray(cfg.allowedSectors)
+    ? cfg.allowedSectors.filter((n) => Number.isFinite(n))
+    : [];
+  const fedSetClause = allowedSectors.length
+    ? `FED_SET = {sectors with region == fedspace} ∪ [${allowedSectors.join(', ')}]`
+    : `FED_SET = {sectors with region == fedspace}`;
+  return `${who}: FEDSPACE TRADING LOOP — buy low, sell high, stop when fuel is gone.
+CONFIG:
+  SELL_TARGETS = [907, 4152, 4790, 1333, 3269, 1618, 674, 1658, 4757, 4700, 1908, 4234, 319, 3236, 3344, 3246, 4938, 422, 919, 1942, 592, 777, 1009, 3358]
+  BUY_THRESHOLDS = { NS: <=30, QF: <=19, RO: <=8 }
+  PRIORITY = [NS, QF, RO]
+  MIN_RESERVE_WARP = 2 × ship's turns_per_warp
+SETUP (once):
+  - my_status → note current sector, warp, cargo hold size, current cargo
+  - my_map → ${fedSetClause} (identify fedspace by which region label the megaports 305/472/1413 carry)
+  - if no fedspace megaport is known: status.update asking to visit one, then wait_in_idle_state
+MAIN LOOP (repeat until out of fuel or stopped):
+  A. BUY (only if cargo hold has free space):
+    1. list_known_ports(from_sector=<current>, max_hops=100, trade_type='buy')
+    2. filter to sector.id in FED_SET
+    3. for commodity in PRIORITY:
+       a. among FED_SET sell-ports, pick the one offering the best (lowest) sell_price meeting BUY_THRESHOLDS[commodity]
+       b. plot_course → move → buy as much as fits in remaining hold; never spend below MIN_RESERVE_WARP
+       c. if hold still has space and another commodity qualifies nearby, keep filling; never travel >8 hops chasing a fill
+    4. if no fedspace ports meet thresholds: wait_in_idle_state a few turns (prices regen 5%/hr), then retry
+  B. SELL (only if cargo has commodities):
+    1. list_known_ports(from_sector=<current>, max_hops=100, trade_type='sell')
+    2. filter to sector.id in SELL_TARGETS
+    3. for each commodity carried, find the SELL_TARGETS port with the best (highest) buy_price
+    4. score profit/hop = (sell_price − avg_bought_price) × qty ÷ hops_there; pick the cargo+port pair with the best ratio
+    5. plot_course → move → sell everything that port will take
+    6. if unsold cargo remains (port stock capped), repeat B with the remainder
+  C. FUEL CHECK (after every trade and every move):
+    - if current_warp_power <= MIN_RESERVE_WARP: plot_course nearest known megaport → move → recharge_warp_power to full → RESUME the main loop (do NOT call finished)
+    - if credits too low to recharge AND warp is gone: bank_withdraw enough to recharge; if bank also empty: status.update "stranded, need rescue", wait_in_idle_state
+  D. PROGRESS LOG (every cycle): status.update "cycle N: bought X NS @ Y avg, sold Z NS @ W avg, net profit P credits, warp remaining R"
+TERMINATION:
+  - stop on stop_task or steer_task
+  - if all BUY_THRESHOLDS are unreachable for 5 cycles in a row (market saturated): status.update, then finished
+do NOT touch any ship that already has a working task — leave those loops running.`;
 };
 
 // Per-user config overrides loaded from data/config.json (git-ignored). This
