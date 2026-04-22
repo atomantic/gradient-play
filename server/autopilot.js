@@ -1329,10 +1329,16 @@ const decide = async (snapshot) => {
       const prev = prevShips.find((s) => s.name === name);
       return prev != null && prev.active !== true;
     };
+    // active !== true (loose) accepts null/undefined too — the DOM
+    // sometimes omits the primary's active flag, and a strict === false
+    // check left the primary permanently sidelined. Spam protection comes
+    // from wasInactivePrev (hysteresis) and the 240s fleet cooldown.
+    // primaryHasTask is intentionally NOT in this gate: the DOM's WORKING
+    // task count lingers stuck-on for minutes after the agent actually
+    // finishes a task, which would block every re-dispatch.
     const primaryReady = primaryShip
-      && primaryShip.active === false
+      && primaryShip.active !== true
       && wasInactivePrev(primaryShip.name)
-      && !primaryHasTask
       && !probeReplaceRecent
       && primaryShip.warpPower != null
       && primaryShip.warpPower >= dispatchMin
