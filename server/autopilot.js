@@ -248,8 +248,8 @@ const DEFAULTS = {
   corpTaskCap: 3,                 // fallback if DOM taskSlots.total isn't reported
   probeSlots: 2,                   // 2 probes for map expansion (explorer/scavenger) — refueler doesn't count
   tradeSlots: 1,                   // 1 corp hauler on a fedspace trade loop; fleet prioritises exploration
-  probeStockpileMin: 20,           // buy probes until we reach this count of fuelled probes on hand at hub
-  probeStockpileMax: 25,           // target ceiling (only the min gate is load-bearing — we buy one/tick while below min)
+  probeStockpileMin: 10,           // when fuelled-probe count drops below this, fire a bulk buy
+  probeStockpileMax: 15,           // bulk-buy ceiling — primary purchases (max-active) probes in one prompt
   primaryDispatchCooldownSec: 300,  // 5 min — tight enough to refill the local slot quickly when a task ends
   fleetTradeCooldownSec: 90,        // re-prompt an idle fleet within ~90s of tasks completing; idempotent so no flood risk
   hubReturnWarp: 100,               // below this fuel, pull ships back to the home hub for refuel
@@ -773,26 +773,36 @@ const decide = async (snapshot) => {
     }
 
     // Buy new probes to top up the stockpile. Only when primary is docked at
-    // hub (ship_purchase spawns at the buyer's current sector).
+    // hub (ship_purchase spawns at the buyer's current sector). Bulk-buys all
+    // the way to stockpileMax in a single prompt so the AI front-loads the
+    // refill instead of dribbling one purchase per tick.
     const activeStockpile = stockpileProbes.filter((p) => (p.warpPower ?? 0) > 0).length;
-    const stockpileMin = cfg.probeStockpileMin ?? 3;
-    const stockpileMax = cfg.probeStockpileMax ?? 8;
+    const stockpileMin = cfg.probeStockpileMin ?? 10;
+    const stockpileMax = cfg.probeStockpileMax ?? 15;
     if (primaryAtMegaport && primaryAvailable && activeStockpile < stockpileMin) {
-      // Next AP number: highest existing + 1, zero-padded to 2 digits.
-      // Tolerate corp-tag prefix (e.g., "SAME-AP40") so we don't restart at AP01.
+      // Next AP number: highest existing + 1. \d+ matches any digit count so
+      // the sequence keeps growing past AP99 — globally-unique ship names
+      // mean we never reset. Tolerates the corp-tag prefix (e.g. SAME-AP40).
       const maxNum = ships.reduce((m, s) => {
         const match = /(?:^|[-_\s])AP(\d+)$/i.exec(String(s.name).trim());
         return match ? Math.max(m, parseInt(match[1], 10)) : m;
       }, 0);
-      const nextName = `AP${String(maxNum + 1).padStart(2, '0')}`;
-      const toBuy = Math.min(stockpileMax - activeStockpile, 1); // one per tick
+      const toBuy = stockpileMax - activeStockpile;
       if (toBuy > 0) {
-        const key = `buy-stockpile:${nextName}`;
+        const startNum = maxNum + 1;
+        const names = Array.from({ length: toBuy }, (_, i) =>
+          `AP${String(startNum + i).padStart(2, '0')}`
+        );
+        const firstName = names[0];
+        const key = `buy-stockpile:${firstName}`;
         if (canAct(key, cfg.refuelCooldownSec * 1000)) {
+          const text = toBuy === 1
+            ? `ship_purchase an Autonomous Probe, rename it ${firstName}`
+            : `ship_purchase ${toBuy} Autonomous Probes back-to-back at this megaport. rename each one immediately after purchase, in this order: ${names.join(', ')}. one rename per ship, no skips, no extra names.`;
           pushInteractive({
             key,
             ship: primaryName,
-            text: `ship_purchase an Autonomous Probe, rename it ${nextName}` + interactiveOnlyClause()
+            text: text + interactiveOnlyClause()
           });
           state.lastDecisionAt.set(key, Date.now());
         }
