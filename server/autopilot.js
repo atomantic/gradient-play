@@ -342,7 +342,15 @@ const state = {
   // The game caps autonomous tasks at 100 steps, so a ship routing to a distant
   // sector will halt mid-transit. If the user told us where it was going, we
   // auto-reissue a continue directive on task-max-steps until the ship arrives.
-  travelIntents: new Map()
+  travelIntents: new Map(),
+  // Auto-confirm only fires on assistant messages that arrive AFTER autopilot
+  // start. Without this, a stale "shall I proceed?" left over from before
+  // start would be auto-confirmed on the very first tick — silently
+  // executing whatever the agent had previously queued. preStartCaptured is
+  // flipped on the first runTick after start; preStartLastAssistantMsg holds
+  // the message that existed at start (empty string if there was none).
+  preStartCaptured: false,
+  preStartLastAssistantMsg: ''
 };
 
 /**
@@ -1763,7 +1771,16 @@ const runTick = async () => {
     // keep "ready to" from matching "already to" etc.
     const msgs = snapshot?.extracted?.lastMessages || [];
     const lastAssistantMsg = [...msgs].reverse().find((m) => m && /ASSISTANT[:\s]/i.test(m));
-    if (lastAssistantMsg) {
+    // First tick after start: capture whatever assistant message was already
+    // in the chat and refuse to auto-confirm it. The autopilot just turned on
+    // — any pending question predates this session and the operator should
+    // decide it manually. Subsequent ticks resume normal auto-confirm as
+    // soon as a NEW assistant message appears.
+    if (!state.preStartCaptured) {
+      state.preStartCaptured = true;
+      state.preStartLastAssistantMsg = lastAssistantMsg || '';
+    }
+    if (lastAssistantMsg && lastAssistantMsg !== state.preStartLastAssistantMsg) {
       const endsWithQuestion = /\?\s*$/.test(lastAssistantMsg);
       const explicitAsk = [
         /\bshall i (proceed|continue|begin|execute|transfer|withdraw|deposit|send|dispatch|fire)\b/i,
@@ -2078,6 +2095,8 @@ export const startAutopilot = (config = {}) => {
   state.seenEventKeys.clear();
   state.plans.clear();
   state.log.length = 0;
+  state.preStartCaptured = false;
+  state.preStartLastAssistantMsg = '';
   if (homeHubFallbackNote) appendLog({ type: 'error', error: homeHubFallbackNote });
   appendLog({ type: 'start', config: state.config });
   runTick();
