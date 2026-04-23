@@ -800,9 +800,11 @@ const decide = async (snapshot) => {
   };
 
   // ── Stockpile management ────────────────────────────────────────────────────
-  // Sell depleted stockpile probes (warp = 0). Remote sell — primary stays put,
-  // sell_ship only checks the primary's sector, not the probe's.
-  if (cfg.enabled.refuel && ceo) {
+  // Sell depleted stockpile probes (warp = 0). The probe stays put — sell_ship
+  // doesn't care where it is — but the *primary* (the ship calling sell_ship)
+  // must be docked at a megaport. Without this gate the agent receives a sell
+  // prompt while the primary is mid-trade and politely refuses every tick.
+  if (cfg.enabled.refuel && ceo && primaryAtMegaport) {
     for (const p of stockpileProbes) {
       if ((p.warpPower ?? 1) > 0) continue; // still has fuel — keep it
       if (p.active === true) continue;
@@ -812,7 +814,7 @@ const decide = async (snapshot) => {
         pushInteractive({
           key,
           ship: primaryName,
-          text: `sell ${p.name} — REMOTE SELL / DO NOT move ${p.name} / sell_ship only checks the primary's sector` + interactiveOnlyClause()
+          text: `sell ${p.name} — REMOTE SELL / DO NOT move ${p.name} / sell_ship only checks the primary's sector (primary is docked at megaport ${primaryShip.sector})` + interactiveOnlyClause()
         });
         state.lastDecisionAt.set(key, Date.now());
       }
