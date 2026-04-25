@@ -12,6 +12,7 @@ const DEFAULT_CONFIG = {
   allowedSectors: [],
   isCeo: false,
   troubleMaker: false,
+  offensiveMode: false,
   maxDecisionsPerTick: 2,
   homeHub: 1413,
   dispatchMinWarp: 200,
@@ -321,6 +322,11 @@ export const AutopilotPanel = () => {
               <input type="checkbox" checked={config.troubleMaker ?? false}
                 onChange={(e) => setConfig({ ...config, troubleMaker: e.target.checked })} />
               troublemaker
+            </label>
+            <label className="flex items-center gap-1 text-red-400 font-semibold" title="Primary raids weak ships just outside fedspace. Requires a Corsair-class (or better) primary — the upgrade path auto-forks to Corsair when this is on. Turns off safe-mode for the primary; banks liquid cash between runs; auto-replaces the hull when fighters drop.">
+              <input type="checkbox" checked={config.offensiveMode ?? false}
+                onChange={(e) => setConfig({ ...config, offensiveMode: e.target.checked })} />
+              offensive
             </label>
             {Object.keys(config.enabled).map((k) => {
               const label = ({

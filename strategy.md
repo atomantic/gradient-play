@@ -44,18 +44,32 @@ Federation space is ONE contiguous cluster, not scattered pockets. Sector IDs lo
 
 ## 2. Opening (First ~30 minutes)
 
-You spawn in a Sparrow Scout loaner, 8 hops from the nearest megaport, with the `tutorial` quest assigned.
+You spawn in a Sparrow Scout loaner, 8 hops from the nearest megaport, with the `tutorial` quest assigned, and **12,000 starting credits** (`user_character_create/index.ts:39` — `DEFAULT_CREDITS = 12000`). Admin-created characters get only 5,000 (`character_create/index.ts:30`); the onboarding path is the generous one.
 
 ### Exact opening sequence
 
-1. `my_status` → note sector, warp power, cargo capacity (20).
+1. `my_status` → note sector, warp power, cargo capacity (20), and your 12K bankroll.
 2. `local_map_region(depth=3)` — scan for adjacent ports and the megaport path.
 3. `plot_course` to the nearest megaport. Use `load_game_info(topic="map legend")` if port codes confuse you.
 4. On the way, **make one trade** (tutorial step 4). Pick any port with a `B` code for something adjacent ports sell. Even a 1-credit profit advances the quest.
 5. At the megaport: `recharge_warp_power` to full (tutorial step 3), then start trading in earnest.
 6. Grind to **1000 credits aggregate profit** (tutorial step 5). This is the bottleneck step — everything else is one-shot.
 7. Buy the **Kestrel Courier** (25,000 credits, but trade-in on the Sparrow covers most of it — net ~4,000).
-8. Claim rewards: **~2,025 credits** in quest payouts if you complete the full tutorial chain.
+8. Claim rewards. **Quest payouts total 1,650 credits** across both tutorials (seed in `deployment/supabase/functions/tests/helpers.ts:672-707`):
+
+   | Quest | Step | Payout |
+   |---|---|---|
+   | tutorial | 1 — Travel to adjacent sector | **50** |
+   | tutorial | 2 — Locate the Megaport | **100** |
+   | tutorial | 3–7 (refuel, first trade, 1000-profit grind, Kestrel buy, accept corp quest) | 0 |
+   | tutorial_corporations | 1 — Create or join a corp | **500** |
+   | tutorial_corporations | 2 — Run a task on a corp ship | **1,000** |
+
+   Rewards are **manual-claim and idempotent** (`quest_claim_reward`, `reward_claimed_at` gate) — no dup exploit. The 500 + 1000 corp-quest payout is ROI-positive vs. the 10K corp founding fee only because it unlocks the fleet model; don't found a corp purely to claim 1,500 cr.
+
+### Total pre-grind bankroll
+
+12,000 starting + 150 tutorial-step rewards + (if you found/join a corp) 1,500 corp-quest rewards = **13,650 cr** before any trading. Against a 25K Kestrel, you're short ~11K — which is exactly the amount tutorial step 5's 1000-profit grind is *not* going to cover. Plan on ~10K of real arbitrage before the Kestrel.
 
 ### Why the Kestrel immediately
 
@@ -390,6 +404,33 @@ Destroyed → you respawn in an Escape Pod: 0 cargo, 0 shields, 0 fighters, 800 
 - 10+ garrisons in a territorial ring around a trade-rich region.
 - Mix of toll (income) and offensive (denial) garrisons.
 - Use `send_message` to threaten / extort passing traders before attacking — reputation does work.
+
+---
+
+## 9.5. Credit Source Audit — What Exists and What Doesn't
+
+Full inventory of credit-injection paths in the codebase (verified 2026-04-21):
+
+| Source | Payout | File |
+|---|---|---|
+| Character onboarding (user path) | **12,000** (once per character) | `user_character_create/index.ts:39` |
+| Character onboarding (admin path) | 5,000 | `character_create/index.ts:30` |
+| Tutorial quest rewards | 50 + 100 | `tests/helpers.ts:672-678` |
+| Corp tutorial quest rewards | 500 + 1,000 | `tests/helpers.ts:706-707` |
+| Trade profit | `(sell − buy) × qty`, `0.75–1.3` multiplier range | `_shared/trading.ts:17-26` |
+| Salvage claim (cargo + on-hand credits + scrap) | ship-dependent; scrap = `max(5, floor(price/1000))` | `_shared/combat_finalization.ts:183-184` |
+| Ship sell / trade-in | `(price − maxFighters·50) + currentFighters·50` | `_shared/ships.ts` |
+
+**What does NOT exist** (checked and absent — do not waste time searching):
+
+- No referral bonuses, no daily login credits, no random drops, no gambling/lottery.
+- No contract/bounty system with variable payouts.
+- No refining/crafting that produces credits.
+- No arbitrage between banks at different megaports — `PRICE_PER_UNIT = 2` for warp recharge is global.
+
+**Multi-character angle.** `MAX_CHARACTERS_PER_USER = 5` (`user_character_create/index.ts:40`). Each fresh character gets the full 12K onboarding grant — 60K theoretical per user across 5 chars. The code does not dedupe by email/account beyond the supabase `user_id` foreign key, so this is a legitimate-if-tedious way to bootstrap a corp's starting capital (have each founding member bring their max-5 characters into the same corp). **But:** corp membership is per-character, not per-user, so it's really "each human can contribute 5 × 12K = 60K" and you still need the bodies to pilot. Realistically only useful as a one-time injection at corp founding.
+
+**No duplication exploits found.** Salvage claim is TTL-gated and single-claim; quest rewards are idempotent; `bank_deposit`/`transfer_credits` are pure moves (no net creation); `ship_sell` + `ship_purchase` is zero-sum minus the fighter-loss differential. The economy is tight.
 
 ---
 

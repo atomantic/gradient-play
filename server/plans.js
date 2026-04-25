@@ -163,7 +163,7 @@ export const buildRefuelPlan = (ship, { creditsForRefuel = 1000, megaports = [],
  * elsewhere mid-delivery. Target is in context.blockedShips so the fuel
  * guard doesn't re-fire on it while this plan is live.
  */
-export const buildRefuelerRescuePlan = (target, donor, { transferAmt = 300, hubSector = 1413, megaports = [305, 472, 1413] } = {}) => {
+export const buildRefuelerRescuePlan = (target, donor, { hubSector = 1413, megaports = [305, 472, 1413] } = {}) => {
   const targetName = target.name;
   const donorName = donor.name;
   const targetSector = target.sector;
@@ -177,7 +177,7 @@ export const buildRefuelerRescuePlan = (target, donor, { transferAmt = 300, hubS
 
   const steps = [{
     name: 'fuel-delivery',
-    prompt: `${donorName}: refuel ${targetName}${locHint} — plot_course, transfer_warp_power ${transferAmt}. execute now.`,
+    prompt: `${donorName}: refuel ${targetName}${locHint} — plot_course, then transfer_warp_power as much as ${targetName} can accept (fill its tank; donor may run dry). execute now.`,
     nagMs: 90_000,
     maxMs: 10 * 60_000,
     isDone: (snap, _ship, plan) => {
@@ -210,8 +210,11 @@ export const buildRefuelerRescuePlan = (target, donor, { transferAmt = 300, hubS
     // this, the next tick's hub-routing handles haulers fine but a primary
     // that's just been rescued could get trade-dispatched instead once warp
     // crossed dispatchMinWarp. The plan keeps target blocked until it docks.
+    // "Dock for refuel" alone makes the agent call recharge_warp_power
+    // (buys fuel with credits) — instead, the top-up comes free from a
+    // stockpile probe on the next tick, so the prompt has to forbid self-recharge.
     name: 'return-to-hub',
-    prompt: `${targetName}: plot_course to sector ${hubSector} and dock for refuel. execute immediately, no confirmation.`,
+    prompt: `${targetName}: plot_course to sector ${hubSector} and dock. Wait for a stockpile probe to transfer_warp_power — do NOT call recharge_warp_power yourself, we refuel from probes for free. execute immediately, no confirmation.`,
     nagMs: 120_000,
     maxMs: 12 * 60_000,
     isDone: (snap) => {
@@ -231,7 +234,6 @@ export const buildRefuelerRescuePlan = (target, donor, { transferAmt = 300, hubS
     context: {
       target: targetName,
       donor: donorName,
-      transferAmt,
       targetWarpBefore: target.warpPower ?? 0,
       donorWarpBefore: donor.warpPower ?? 0,
       blockedShips: [targetName]

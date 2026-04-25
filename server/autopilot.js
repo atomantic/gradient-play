@@ -165,6 +165,38 @@ const upgradePrompt = (shipName, total, next) => pick([
 const primaryTradePrompt = (primary) =>
   `${primary}: fedspace trade run, your choice of ports.` + standingOrders(primary);
 
+const primaryOffensivePrompt = (primary, { minFighters = 500 } = {}) => {
+  const hub = homeHub();
+  return `${primary}: OFFENSIVE RAID LOOP — hunt weaker ships just outside federation space.
+SETUP (once at loop start, only while docked at a MEGA port):
+  1. my_status → note fighters (cur/max), shields, warp, cargo hold, on-hand + bank
+  2. bank_deposit all on-hand above 1000 cr. destruction drops cargo + on-hand, never banked credits.
+  3. recharge_warp_power to full
+  4. If fighters < max: bank_withdraw (max - current) * 50, then purchase_fighters (max - current). Fighters cost 50 cr each; purchase_fighters only works when docked at a MEGA port and caps to your hull's max automatically.
+MAIN LOOP (repeat until ABORT triggers fire):
+  A. PICK TARGET SECTOR
+    - local_map_region(depth=3) from ${hub}. Filter to sectors with region != fedspace that are 1-3 hops from a fedspace sector (tight egress — you need to sprint home when shields drop).
+    - If a candidate sector has a visible scan, prefer it; otherwise move one hop and re-scan.
+  B. MOVE + SCAN
+    - plot_course → move one hop. On arrival, scan_sector.
+    - Evaluate occupants: any ship with fighters < (MY_FIGHTERS × 0.6) AND shields < (MY_SHIELDS × 0.7) is prey. Ships equal or stronger: disengage, pick another sector.
+    - Garrisons: skip anything ≥ 400 fighters. Toll gates: always skip.
+  C. ENGAGE + COLLECT
+    - attack_ship(target). After the fight, salvage_collect every container in-sector (credits + any cargo that fits + scrap).
+    - If you took a shield-hit but won, continue one more hop if fighters ≥ ${minFighters}; otherwise break to RETURN.
+  D. FUEL CHECK after every move: if current_warp_power <= 2 × turns_per_warp, break to RETURN.
+  E. RETURN trigger (any of): fighters < ${minFighters}, shields < 30% max, cargo full, warp <= 2 × turns_per_warp.
+RETURN:
+  1. plot_course → MEGA port ${hub} (or nearer mega if known)
+  2. on dock: sell all cargo that the port buys, bank_deposit everything above 1000 cr, recharge_warp_power
+  3. Refill fighters: bank_withdraw (max - current) * 50, then purchase_fighters (max - current). If bank + on-hand can't cover a full refill, buy as many as you can afford (keep a 1000 cr buffer for next refuel).
+  4. resume SETUP step 1 and loop.
+ABORT (hard stop, status.update "raid halted: <reason>", wait_in_idle_state):
+  - bank + on-hand < 10000 AND fighters < ${minFighters}: can't restock and can't fight. Return to fedspace and stay put.
+  - two consecutive scans turn up no valid prey within 3 hops: status.update "no adjacent prey", wait_in_idle_state 10 turns, retry.
+Do NOT call finished — keep looping. Do NOT wander deeper than 4 hops from the fedspace border. [execute immediately, no confirmation]`;
+};
+
 /**
  * Reckless frontier mode for the primary ship. Leaves fedspace, hunts
  * salvage, engages combat, trades only for fuel money. Comes home to the
@@ -224,8 +256,8 @@ MAIN LOOP (repeat until out of fuel or stopped):
     5. plot_course → move → sell everything that port will take
     6. if unsold cargo remains (port stock capped), repeat B with the remainder
   C. FUEL CHECK (after every trade and every move):
-    - if current_warp_power <= MIN_RESERVE_WARP: plot_course nearest known megaport → move → recharge_warp_power to full → RESUME the main loop (do NOT call finished)
-    - if credits too low to recharge AND warp is gone: bank_withdraw enough to recharge; if bank also empty: status.update "stranded, need rescue", wait_in_idle_state
+    - if current_warp_power <= MIN_RESERVE_WARP: plot_course to home hub ${homeHub()} → dock → wait_in_idle_state (a stockpile probe will transfer_warp_power for free; do NOT call recharge_warp_power, the fleet uses probe fuel)
+    - if warp is fully gone before you reach the hub: status.update "stranded, need rescue", wait_in_idle_state — a probe will come to you
   D. PROGRESS LOG (every cycle): status.update "cycle N: bought X NS @ Y avg, sold Z NS @ W avg, net profit P credits, warp remaining R"
 TERMINATION:
   - stop on stop_task or steer_task
@@ -307,6 +339,8 @@ const DEFAULTS = {
   // don't stomp on a corp's task slots. Override per-user via data/config.json.
   isCeo: false,
   troubleMaker: false,             // reckless mode: primary leaves fedspace for salvage + combat + frontier trading
+  offensiveMode: false,            // offensive mode: primary raids weak ships just outside fedspace; forks upgrade path to Corsair Raider
+  offensiveMinFighters: 500,       // raid returns home when fighters drop below this — interpolated into the raid prompt
   maxDecisionsPerTick: 2,          // never fire more than N prompts in one tick — avoids flooding the agent
   interPromptDelayMs: 12_000,      // pause between consecutive prompts in the same tick so the agent finishes the previous action before the next arrives
   enabled: {
@@ -628,8 +662,23 @@ const NEXT_UPGRADE = {
   AEGIS: { name: 'Sovereign Starcruiser', price: 2500000, netCost: 2080000 }
 };
 
-const findNextUpgrade = (shipName = '') => {
+// Combat fork: cargo-line → Corsair in one jump. Once on the combat line
+// (Corsair onward), findNextUpgrade falls through to NEXT_UPGRADE above.
+const COMBAT_UPGRADE = {
+  SPARROW: { name: 'Corsair Raider', price: 180000, netCost: 175000 },
+  KESTREL:  { name: 'Corsair Raider', price: 180000, netCost: 165000 },
+  WAYFARER: { name: 'Corsair Raider', price: 180000, netCost: 108000 },
+  PIONEER:  { name: 'Corsair Raider', price: 180000, netCost: 48000 },
+  ATLAS:    { name: 'Corsair Raider', price: 180000, netCost: 24000 }
+};
+
+const findNextUpgrade = (shipName = '', offensive = false) => {
   const n = shipName.toUpperCase();
+  if (offensive) {
+    for (const key of Object.keys(COMBAT_UPGRADE)) {
+      if (n.includes(key)) return COMBAT_UPGRADE[key];
+    }
+  }
   for (const key of Object.keys(NEXT_UPGRADE)) {
     if (n.includes(key)) return NEXT_UPGRADE[key];
   }
@@ -971,9 +1020,7 @@ const decide = async (snapshot) => {
         }
         continue;
       }
-      const transferAmt = Math.max(100, Math.min((donor.warpPower ?? 0) - 20, 400));
       const plan = buildRefuelerRescuePlan(target, donor, {
-        transferAmt,
         hubSector: homeHub(),
         megaports: megaportSectors()
       });
@@ -1338,6 +1385,9 @@ const decide = async (snapshot) => {
     // primaryHasTask is intentionally NOT in this gate: the DOM's WORKING
     // task count lingers stuck-on for minutes after the agent actually
     // finishes a task, which would block every re-dispatch.
+    // Offensive mode routes a combat-class primary to the raid branch below,
+    // so we skip it from the fleet trade dispatch.
+    const primaryClaimedByRaid = !!cfg.offensiveMode && primaryShip && shipKind(primaryShip.name) === 'combat';
     const primaryReady = primaryShip
       && primaryShip.active !== true
       && wasInactivePrev(primaryShip.name)
@@ -1345,7 +1395,8 @@ const decide = async (snapshot) => {
       && primaryShip.warpPower != null
       && primaryShip.warpPower >= dispatchMin
       && !hasPlan(primaryShip.name)
-      && !primaryHoldForRefuel;
+      && !primaryHoldForRefuel
+      && !primaryClaimedByRaid;
     const haulersReady = idleHaulers.filter((h) =>
       !isUnderfunded(h)
       && !hasPlan(h.name)
@@ -1385,7 +1436,7 @@ const decide = async (snapshot) => {
       if (fundableAtHub(hauler)) {
         const key = `fund:${hauler.name}`;
         if (canAct(key, cfg.refuelCooldownSec * 1000)) {
-          pushInteractive({ key, ship: hauler.name, text: shipFundPrompt(hauler.name, hauler.credits, fundingFloor) });
+          pushInteractive({ key, ship: hauler.name, text: shipFundPrompt(hauler.name, hauler.credits, fundingFloor), bypassFloorGuard: true });
         }
       }
     }
@@ -1414,7 +1465,7 @@ const decide = async (snapshot) => {
       if (!primaryCanFund) continue;
       const key = `fund:${probe.name}`;
       if (canAct(key, cfg.refuelCooldownSec * 1000)) {
-        pushInteractive({ key, ship: probe.name, text: shipFundPrompt(probe.name, probe.credits, fundingFloor) });
+        pushInteractive({ key, ship: probe.name, text: shipFundPrompt(probe.name, probe.credits, fundingFloor), bypassFloorGuard: true });
       }
       continue;
     }
@@ -1475,7 +1526,8 @@ const decide = async (snapshot) => {
         pushTaskDecision({
           key,
           ship: primaryName,
-          text: bankSweepPrompt(primaryName, excess, onHand, cfg.onHandFloor)
+          text: bankSweepPrompt(primaryName, excess, onHand, cfg.onHandFloor),
+          bypassFloorGuard: true
         });
       }
     }
@@ -1494,7 +1546,8 @@ const decide = async (snapshot) => {
       pushInteractive({
         key,
         ship: s.name,
-        text: shipSweepPrompt(s.name, s.credits, shipExcess, cfg.onHandFloor)
+        text: shipSweepPrompt(s.name, s.credits, shipExcess, cfg.onHandFloor),
+        bypassFloorGuard: true
       });
     }
   }
@@ -1518,7 +1571,8 @@ const decide = async (snapshot) => {
       }
     }
     for (const cand of upgradeCandidates) {
-      const next = findNextUpgrade(cand.name);
+      // Offensive mode forks the primary onto the Corsair ladder; haulers stay on cargo.
+      const next = findNextUpgrade(cand.name, !!cfg.offensiveMode && cand.role === 'primary');
       if (!next) continue;
       if (total < (next.netCost ?? next.price)) continue;
       const key = `upgrade:${cand.name}`;
@@ -1551,19 +1605,26 @@ const decide = async (snapshot) => {
     // the top of decide(); only troublemaker mode still needs a solo primary
     // prompt because its directive leaves fedspace and can't be packaged
     // into the fleet-trade wording.
-    if (
-      cfg.troubleMaker &&
-      primaryShip &&
-      !primaryHasTask &&
-      !probeReplaceRecent &&
-      primaryShip.warpPower != null &&
-      primaryShip.warpPower >= (cfg.dispatchMinWarp ?? cfg.minWarp) &&
-      !hasPlan(primaryShip.name) &&
-      !primaryHoldForRefuel
-    ) {
+    const primarySoloReady = primaryShip
+      && !primaryHasTask
+      && !probeReplaceRecent
+      && primaryShip.warpPower != null
+      && primaryShip.warpPower >= (cfg.dispatchMinWarp ?? cfg.minWarp)
+      && !hasPlan(primaryShip.name)
+      && !primaryHoldForRefuel;
+
+    if (cfg.troubleMaker && primarySoloReady) {
       const key = 'primary:troublemaker';
       if (canAct(key, cfg.primaryDispatchCooldownSec * 1000)) {
-        pushTaskDecision({ key, ship: primaryShip.name, text: primaryTroubleMakerPrompt(primaryShip.name) });
+        pushTaskDecision({ key, ship: primaryShip.name, text: primaryTroubleMakerPrompt(primaryShip.name), bypassFloorGuard: true });
+      }
+    }
+
+    if (cfg.offensiveMode && primarySoloReady && shipKind(primaryShip.name) === 'combat') {
+      const key = 'primary:offensive';
+      if (canAct(key, cfg.primaryDispatchCooldownSec * 1000)) {
+        const text = primaryOffensivePrompt(primaryShip.name, { minFighters: cfg.offensiveMinFighters });
+        pushTaskDecision({ key, ship: primaryShip.name, text, bypassFloorGuard: true });
       }
     }
   }
@@ -2026,7 +2087,7 @@ const runTick = async () => {
               skipped: true
             });
           } else {
-            const send = await sendAssistantPrompt(first.prompt).catch((e) => ({ ok: false, error: e.message }));
+            const send = await sendAssistantPrompt(first.prompt, { bypassFloorGuard: !!(d.bypassFloorGuard || first.bypassFloorGuard) }).catch((e) => ({ ok: false, error: e.message }));
             plan.lastPromptedAt = Date.now();
             plan.promptCount += 1;
             appendLog({
@@ -2046,7 +2107,7 @@ const runTick = async () => {
           state.lastDecisionAt.set(d.key, Date.now());
           appendLog({ type: 'decision', key: d.key, ship: d.ship, text: d.text, skipped: true, note: 'dedup — same prompt already in recent chat' });
         } else {
-          const send = await sendAssistantPrompt(d.text).catch((e) => ({ ok: false, error: e.message }));
+          const send = await sendAssistantPrompt(d.text, { bypassFloorGuard: !!d.bypassFloorGuard }).catch((e) => ({ ok: false, error: e.message }));
           state.lastDecisionAt.set(d.key, Date.now());
           appendLog({ type: 'decision', key: d.key, ship: d.ship, text: d.text, send });
         }

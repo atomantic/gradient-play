@@ -1,5 +1,6 @@
 import { chromium } from 'playwright-core';
 import { getCredentials } from './credentials.js';
+import { detectFloorLanguage } from './prompt-guard.js';
 
 const CDP_ENDPOINT = process.env.CDP_ENDPOINT || 'http://127.0.0.1:5556';
 const GAME_URL = process.env.GAME_URL || 'https://game.gradient-bang.com';
@@ -84,7 +85,16 @@ export const getConnectionStatus = async () => {
  * Zustand stores are not exposed on window, so we scrape the PlayerShipPanel
  * and TopBarCreditBalance. Values read via icon-adjacent numeric text.
  */
+// Concurrent callers (autopilot tick + N missions running verifyDispatch)
+// share the same in-flight page.evaluate instead of hammering CDP in parallel.
+let snapshotInFlight = null;
 export const getGameSnapshot = async () => {
+  if (snapshotInFlight) return snapshotInFlight;
+  snapshotInFlight = doGetGameSnapshot().finally(() => { snapshotInFlight = null; });
+  return snapshotInFlight;
+};
+
+const doGetGameSnapshot = async () => {
   let page;
   try {
     page = await withPage();
@@ -416,7 +426,14 @@ const findAssistantInput = async (page) => {
 // Serialize typing into the chat input. A long prompt types for ~3s
 // (~500 chars × 6ms); without this queue, concurrent callers interleave
 // characters into the same <input>, producing scrambled messages.
-export const sendAssistantPrompt = async (text) => {
+export const sendAssistantPrompt = async (text, opts = {}) => {
+  const { bypassFloorGuard = false } = opts;
+  if (!bypassFloorGuard) {
+    const floor = detectFloorLanguage(text);
+    if (floor.matched) {
+      console.warn(`[prompt-guard] floor-language detected in non-deposit send (sample="${floor.sample}"); proceeding but agent may refuse cargo buys. Use bypassFloorGuard:true only on deposit/sweep prompts.`);
+    }
+  }
   const task = sendChain.then(async () => {
     const page = await withPage();
     const wait = lastSendEndedAt + SEND_THROTTLE_MS - Date.now();
@@ -441,6 +458,52 @@ export const sendAssistantPrompt = async (text) => {
   });
   sendChain = task.catch(() => {});
   return task;
+};
+
+// Caller is responsible for having JUST sent a prompt; baseline is captured
+// on first poll. Returns { landed, reason, wallMs } — see the if-branches
+// below for what "landed" means.
+export const verifyDispatch = async (shipName, opts = {}) => {
+  const { timeoutMs = 12000, pollMs = 1500 } = opts;
+  const started = Date.now();
+  const norm = (s) => String(s ?? '').trim().toLowerCase();
+  const target = norm(shipName);
+
+  const takeSnap = async () => {
+    const snap = await getGameSnapshot();
+    if (!snap?.ok) return null;
+    const ex = snap.extracted || {};
+    const tasks = Array.isArray(ex.tasks) ? ex.tasks : [];
+    const workingDescs = tasks.filter((t) => t.working).map((t) => t.description || '');
+    const ship = (ex.ships || []).find((s) => norm(s.name) === target) ?? null;
+    return {
+      workingCount: workingDescs.length,
+      workingDescs,
+      shipActive: ship ? !!ship.active : null,
+    };
+  };
+
+  const baseline = await takeSnap();
+  if (!baseline) return { landed: false, reason: 'snapshot_unavailable', wallMs: Date.now() - started };
+  const baselineDescs = new Set(baseline.workingDescs);
+
+  while (Date.now() - started < timeoutMs) {
+    await new Promise((r) => setTimeout(r, pollMs));
+    const cur = await takeSnap();
+    if (!cur) continue;
+    if (cur.workingCount > baseline.workingCount) {
+      return { landed: true, reason: 'new_working_task', wallMs: Date.now() - started };
+    }
+    for (const d of cur.workingDescs) {
+      if (d && !baselineDescs.has(d)) {
+        return { landed: true, reason: 'task_description_changed', wallMs: Date.now() - started };
+      }
+    }
+    if (target && baseline.shipActive === false && cur.shipActive === true) {
+      return { landed: true, reason: 'ship_active_transition', wallMs: Date.now() - started };
+    }
+  }
+  return { landed: false, reason: 'timeout', wallMs: Date.now() - started };
 };
 
 /**

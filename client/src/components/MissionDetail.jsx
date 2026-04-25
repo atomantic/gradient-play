@@ -9,7 +9,8 @@ const entryColor = (type) => ({
   start: 'text-emerald-400',
   stop: 'text-cyan-400',
   abort: 'text-rose-400',
-  error: 'text-rose-300'
+  error: 'text-rose-300',
+  'verify-dispatch': 'text-indigo-300'
 }[type] || 'text-slate-400');
 
 const formatEntry = (e) => {
@@ -36,6 +37,10 @@ const formatEntry = (e) => {
   }
   if (e.type === 'error') return 'error: ' + e.error;
   if (e.type === 'abort' || e.type === 'stop') return `${e.type}: ${e.reason || ''}  ${e.prompt ? '→ ' + e.prompt.slice(0, 120) : ''}`;
+  if (e.type === 'verify-dispatch') {
+    if (e.error) return `verify: ${e.error}`;
+    return `verify: ${e.landed ? 'landed' : 'NOT LANDED'} (${e.reason}) after ${e.wallMs}ms`;
+  }
   return JSON.stringify(e);
 };
 

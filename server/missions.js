@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto';
-import { getGameSnapshot, sendAssistantPrompt, getMapSectors } from './cdp.js';
+import { getGameSnapshot, sendAssistantPrompt, getMapSectors, verifyDispatch } from './cdp.js';
 import { findNearestFrontier } from './autopilot.js';
 
 // Placeholder that missions can embed in their goal to get the server-side
@@ -304,6 +304,24 @@ const runTick = async (mission) => {
     mission.lastPromptAt = Date.now();
     mission.lastActivityAt = Date.now();
     appendLog(mission, { type: 'kickoff', text: prompt, send });
+    // Chat confirmation isn't ground truth — the task engine sometimes silently
+    // drops a dispatch. Watch snapshot for a working-task change or active flip.
+    if (send?.ok) {
+      verifyDispatch(mission.shipName)
+        .then((verify) => {
+          if (mission.status !== 'running') return;
+          appendLog(mission, {
+            type: 'verify-dispatch',
+            landed: verify.landed,
+            reason: verify.reason,
+            wallMs: verify.wallMs
+          });
+        })
+        .catch((err) => {
+          if (mission.status !== 'running') return;
+          appendLog(mission, { type: 'verify-dispatch', error: err.message });
+        });
+    }
   } else if (
     spec.nudgeAfterIdleSec > 0 &&
     !activity.active &&
