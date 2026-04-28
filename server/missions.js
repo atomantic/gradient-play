@@ -1,6 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import { getGameSnapshot, sendAssistantPrompt, getMapSectors, verifyDispatch } from './cdp.js';
 import { findNearestFrontier } from './autopilot.js';
+import { pick } from './utils.js';
 
 // Placeholder that missions can embed in their goal to get the server-side
 // frontier BFS (same logic autopilot uses for probe dispatch) interpolated in
@@ -59,8 +60,6 @@ const evaluateCondition = (cond, snapshot) => {
     default: return false;
   }
 };
-
-const pick = (arr) => arr[Math.floor(Math.random() * arr.length)];
 
 const shipPhrase = (spec) =>
   spec.targetShip ? `the ${spec.targetShip}` : 'the fleet';
@@ -307,7 +306,7 @@ const runTick = async (mission) => {
     // Chat confirmation isn't ground truth — the task engine sometimes silently
     // drops a dispatch. Watch snapshot for a working-task change or active flip.
     if (send?.ok) {
-      verifyDispatch(mission.shipName)
+      verifyDispatch(mission.spec.targetShip)
         .then((verify) => {
           if (mission.status !== 'running') return;
           appendLog(mission, {
