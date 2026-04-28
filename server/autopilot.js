@@ -516,10 +516,11 @@ const shipKind = (name = '') => {
   if (/KESTREL|SPARROW|COURIER/.test(n)) return 'trader-light';
   if (/CORSAIR|PIKE|BULWARK|AEGIS|SOVEREIGN|RAIDER|FRIGATE|DESTROYER|CRUISER/.test(n)) return 'combat';
   if (/PROBE|EXPLORER|SCAVENGER|SALVAGER|SCOUT|PATHFINDER|REFUELER|TANKER|FUEL/.test(n)) return 'probe';
-  // Compact corp-tag naming used in-game: "SAME-AP23" is an autonomous
-  // probe, "SAME-A1" is a hauler. Without this fallback, cdp-scraped names
-  // resolve to 'unknown' and the refuel/trade/stockpile logic all bails.
-  if (/(?:^|[-_\s])AP\d+$/.test(n)) return 'probe';
+  // Compact corp-tag naming used in-game: "SAME-AP23" / "AP1413-10" is an
+  // autonomous probe (the optional -NN suffix encodes a sequence number under
+  // a hub-prefix variant); "SAME-A1" is a hauler. Without this fallback,
+  // cdp-scraped names resolve to 'unknown' and refuel/trade/stockpile bails.
+  if (/(?:^|[-_\s])AP\d+(?:[-_]\d+)?$/.test(n)) return 'probe';
   if (/(?:^|[-_\s])A\d+$/.test(n)) return 'hauler';
   return 'unknown';
 };
@@ -551,7 +552,13 @@ const isReserveProbe = (name = '') => /(?:^|[-_\s])PROBE[A-Z]$/i.test(String(nam
  * They sit idle at the home hub, top up haulers on demand, then get
  * remote-sold once depleted. Net cost ≈ 0 (sell refund ≈ purchase price).
  */
-const isStockpileProbe = (name = '') => /(?:^|[-_\s])AP\d+$/i.test(String(name).trim());
+const isStockpileProbe = (name = '') => /(?:^|[-_\s])AP\d+(?:[-_]\d+)?$/i.test(String(name).trim());
+
+// Probes the user has renamed to act as static HUD-style labels (e.g. parked
+// at the hub or out in the field as visual markers). The autopilot must not
+// rename, move, refuel, sell, or replace these — full hands-off.
+const PROTECTED_PROBE_NAMES = new Set(['BANK', 'MY SHIP', 'ON HAND']);
+const isProtectedProbe = (name = '') => PROTECTED_PROBE_NAMES.has(String(name).trim().toUpperCase());
 
 /**
  * BFS hop-distance lookup from an origin sector. Returns a Map<sectorId,
@@ -855,6 +862,7 @@ const decide = async (snapshot) => {
   // prompt while the primary is mid-trade and politely refuses every tick.
   if (cfg.enabled.refuel && ceo && primaryAtMegaport) {
     for (const p of stockpileProbes) {
+      if (isProtectedProbe(p.name)) continue;
       if ((p.warpPower ?? 1) > 0) continue; // still has fuel — keep it
       if (p.active === true) continue;
       if (shipInAnyPlan(p.name)) continue;
@@ -921,6 +929,7 @@ const decide = async (snapshot) => {
     // Stockpile probes (AP##) are sold when depleted, not rescued.
     if (shipKind(s.name) === 'probe') return false;
     if (isStockpileProbe(s.name)) return false;
+    if (isProtectedProbe(s.name)) return false;
     if (!ceo && !s.primary) return false;
     // Only field-rescue truly stranded ships. Ships with warp between
     // fuelCriticalWarp and dispatchMinWarp route to hub on their own.
@@ -951,6 +960,7 @@ const decide = async (snapshot) => {
     const candidates = ships.filter((s) =>
       !s.primary
       && shipKind(s.name) === 'probe'
+      && !isProtectedProbe(s.name)
       && s.name !== target.name
       && !claimedDonors.has(s.name)
       && !shipInAnyPlan(s.name)
@@ -1136,6 +1146,7 @@ const decide = async (snapshot) => {
     for (const s of ships) {
       if (s.primary) continue;
       if (shipKind(s.name) !== 'probe') continue;
+      if (isProtectedProbe(s.name)) continue;
       if (!s.name || s.name.length <= MAX_NAME_CHARS) continue;
       const key = `shorten:${s.name}`;
       if (!canAct(key, 10 * 60_000)) continue;
@@ -1181,6 +1192,7 @@ const decide = async (snapshot) => {
       !s.primary
       && shipKind(s.name) === 'probe'
       && !isStockpileProbe(s.name) // stockpile probes use the simpler sell-stockpile path
+      && !isProtectedProbe(s.name)
       && s.warpPower != null && s.warpPower <= SCRAP_WARP_CEILING
       && s.active !== true
       && !hasPlan(s.name)
@@ -1306,6 +1318,7 @@ const decide = async (snapshot) => {
     shipKind(s.name) === 'probe'
     && probeRole(s.name) !== 'refueler'
     && !isReserveProbe(s.name) // bench probes stay idle until activated by rename
+    && !isProtectedProbe(s.name)
   );
   explorerIdleProbes.sort((a, b) => (b.warpPower || 0) - (a.warpPower || 0));
   // Refuelers don't count toward probe-slot usage — they're idle by design.
