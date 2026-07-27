@@ -431,7 +431,7 @@ export const sendAssistantPrompt = async (text, opts = {}) => {
   if (!bypassFloorGuard) {
     const floor = detectFloorLanguage(text);
     if (floor.matched) {
-      console.warn(`[prompt-guard] floor-language detected in non-deposit send (sample="${floor.sample}"); proceeding but agent may refuse cargo buys. Use bypassFloorGuard:true only on deposit/sweep prompts.`);
+      console.warn(`⚠️ prompt-guard: floor-language in non-deposit send (sample="${floor.sample}") — agent may refuse cargo buys; pass {bypassFloorGuard:true} for deposit/sweep prompts`);
     }
   }
   const task = sendChain.then(async () => {

@@ -1,8 +1,7 @@
 import { getGameSnapshot, sendAssistantPrompt, clickGameReconnect, loginIfNeeded, getMapSectors } from './cdp.js';
 import { observe as intelObserve } from './intel.js';
 import { buildRefuelerRescuePlan, buildBuyProbeRefuelPlan, buildProbeReplacementPlan, buildFleetRallyPlan, FLEET_PLAN_KEY, currentStepOf, isComplete, advance } from './plans.js';
-
-const pick = (arr) => arr[Math.floor(Math.random() * arr.length)];
+import { pick } from './utils.js';
 
 // Known mega-port sectors — strategic hubs within federation space.
 // Discovered so far; more may exist. Configurable via cfg.megaports.

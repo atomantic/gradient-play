@@ -25,6 +25,7 @@ import { credentialsStatus, setCredentials, clearCredentials } from './credentia
 import { startAutopilot, stopAutopilot, getAutopilotState, subscribeAutopilotLog, startFleetRally, fireRallyStep, fireSalvageScan, dryRunDecide } from './autopilot.js';
 import { getIntel, addManualEvent, updateEvent as updateIntelEvent, deleteEvent, clearIntel, observe as intelObserve } from './intel.js';
 import { aiToolkit, adviseAutopilot, adviseWithStrategy } from './advisor.js';
+import { pick } from './utils.js';
 
 const PORT = Number(process.env.PORT || 5572);
 const HOST = process.env.HOST || '127.0.0.1';
@@ -78,10 +79,8 @@ app.post('/api/fleet/rename-ship', async (req, res) => {
 });
 
 app.post('/api/fleet/recall-refuel', async (_req, res) => {
-  const { getGameSnapshot } = await import('./cdp.js');
   const snap = await getGameSnapshot();
   const ships = (snap?.extracted?.ships || []).map((s) => s.name).filter(Boolean);
-  const pick = (arr) => arr[Math.floor(Math.random() * arr.length)];
   const routing = 'closest safe megaport for each ship.';
   const fleetLabel = ships.length ? ships.join(', ') : 'the whole corp fleet';
   const text = pick([
@@ -180,7 +179,7 @@ app.post('/api/intel/query-attackers', async (req, res) => {
   const { ships } = req.body || {};
   const shipList = Array.isArray(ships) && ships.length ? ships.join(', ') : 'our destroyed ships';
   const prompt = `Quick intel request: use event_query to look up the combat events for ${shipList}. For each one, tell me the attacker's player name and sector. No need to act on it — just report the names and sectors.`;
-  const send = await (await import('./cdp.js')).sendAssistantPrompt(prompt).catch((e) => ({ ok: false, error: e.message }));
+  const send = await sendAssistantPrompt(prompt).catch((e) => ({ ok: false, error: e.message }));
   log('📜', 'Asked agent to identify attackers', { ships: shipList, ok: send.ok });
   res.json({ ok: !!send.ok, send, prompt });
 });
@@ -191,7 +190,7 @@ app.delete('/api/intel', (_req, res) => {
 });
 
 app.post('/api/intel/scan', async (_req, res) => {
-  const snap = await (await import('./cdp.js')).getGameSnapshot();
+  const snap = await getGameSnapshot();
   const added = intelObserve(snap);
   res.json({ ok: true, added });
 });
